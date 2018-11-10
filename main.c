@@ -12,30 +12,36 @@
 #include "distributed.h"
 #include "common.h"
 #include "phases.h"
+#include "core.h"
+
+/**
+ * Joins created processes.
+ *
+ * @param count a processes count to join
+ */
+void join_processes(local_id count);
 
 /**
  * Executes phases for child process.
  *
- * @param id local ID of current child process
+ * @param state a state of current child process
  * @return 0 if success
  */
-int execute_child(local_id id);
+int execute_child(ProcessState *state);
 
 /**
  * Executes phases for parent process.
  *
+ * @param state a state of parent process
  * @return 0 if success
  */
-int execute_parent();
-
-
-long processes_count;
-int pipes_descriptors[TOTAL_PROCESSES][TOTAL_PROCESSES * 2];
-int evt_log, pd_log;
+int execute_parent(ProcessState *state);
 
 int main(int argc, const char *argv[]) {
-    local_id lid;
-    int result;
+    long processes_count;
+    int pipes_descriptors[TOTAL_PROCESSES][TOTAL_PROCESSES * 2];
+    int evt_log, pd_log;
+    ProcessState parent_state;
 
     if (argc != 3 || strcmp(argv[1], "-p") != 0) {
         fprintf(stderr, "Usage %s -p X, where X is number of child processes.\n", argv[0]);
@@ -54,51 +60,80 @@ int main(int argc, const char *argv[]) {
         return 3;
     }
 
-    if (init_pipes(processes_count, pipes_descriptors)) {
-        fprintf(stderr, "Failed to initialize pipes descriptors!\n");
+    evt_log = open(events_log, O_WRONLY | O_APPEND | O_CREAT, 0777);
+    if (evt_log < 0) {
+        fprintf(stderr, "Failed to open events log!\n");
         close(pd_log);
         return 4;
     }
 
-    evt_log = open(events_log, O_WRONLY | O_APPEND | O_CREAT, 0777);
-    if (evt_log < 0) {
-        fprintf(stderr, "Failed to open events log!\n");
-        close_pipes(processes_count, pipes_descriptors);
+    parent_state.id = PARENT_ID;
+    parent_state.processes_count = processes_count;
+    parent_state.evt_log = evt_log;
+    parent_state.pd_log = pd_log;
+
+    if (init_pipes(&parent_state, pipes_descriptors)) {
+        fprintf(stderr, "Failed to initialize pipes descriptors!\n");
         close(pd_log);
         return 5;
     }
 
-    for (lid = 1; lid <= processes_count; ++lid) {
+    for (local_id id = 1; id <= processes_count; ++id) {
         pid_t pid;
 
         pid = fork();
         if (pid < 0) {
-            fprintf(stderr, "Failed to fork process: local_id=%d\n", lid);
-            break;
+            fprintf(stderr, "Failed to fork process: id=%d\n", id);
+            close_pipes(&parent_state, pipes_descriptors);
+            close(pd_log);
+            close(evt_log);
+            join_processes(id);
+            return -1;
         } else if (!pid) {
-            if (execute_child(lid)) {
-                fprintf(stderr, "Failed to execute child: local_id=%d\n", lid);
-                close(pd_log);
-                close(evt_log);
+            int result;
+            ProcessState process_state;
+
+            process_state.id = id;
+            process_state.processes_count = processes_count;
+            process_state.evt_log = evt_log;
+            process_state.pd_log = pd_log;
+
+            if (prepare_pipes(&process_state, pipes_descriptors)) {
+                fprintf(stderr, "(%d) Failed to prepare pipes.\n", id);
+                close_pipes(&process_state, pipes_descriptors);
                 return 1;
+            }
+
+            if ((result = execute_child(&process_state))) {
+                fprintf(stderr, "(%d) Failed to execute child!\n", id);
             }
             close(pd_log);
             close(evt_log);
-            return 0;
+            return result;
         }
     }
 
-    if (lid > processes_count) {
-        result = execute_parent();
-    } else {
-        fprintf(stderr, "Error occurred while forking processes!\n");
-        result = -1;
+    {
+        int result;
+
+        if (prepare_pipes(&parent_state, pipes_descriptors)) {
+            fprintf(stderr, "Failed to prepare parent pipes\n");
+            close_pipes(&parent_state, pipes_descriptors);
+            return 1;
+        }
+
+        if ((result = execute_parent(&parent_state))) {
+            fprintf(stderr, "Failed to execute parent!\n");
+        }
+        close(pd_log);
+        close(evt_log);
+        join_processes((local_id) processes_count);
+        return result;
     }
+}
 
-    close(pd_log);
-    close(evt_log);
-
-    for (int i = 1; i < lid; ++i) {
+void join_processes(local_id count) {
+    for (int i = 1; i <= count; ++i) {
         pid_t pid;
         int status;
 
@@ -116,87 +151,63 @@ int main(int argc, const char *argv[]) {
             fprintf(stderr, "Child process was stopped by signal: pid=%d signal=%d\n", pid, WSTOPSIG(status));
         }
     }
-
-    return result;
 }
 
-void log_pipe(const char *fmt, ...) {
+void log_pipe(ProcessState *state, const char *fmt, ...) {
     va_list args;
     char buffer[1024];
 
     va_start(args, fmt);
     vsprintf(buffer, fmt, args);
-    write(pd_log, buffer, strlen(buffer));
+    write(state->pd_log, buffer, strlen(buffer));
     va_end(args);
 }
 
-void log_event(const char *message) {
-    write(evt_log, message, strlen(message));
+void log_event(ProcessState *state, const char *message) {
+    write(state->evt_log, message, strlen(message));
     printf("%s", message);
 }
 
-int execute_child(local_id id) {
-    ProcessInfo process_info;
-
-    process_info.id = id;
-    process_info.processes_count = processes_count;
-
-    if (prepare_pipes(&process_info, pipes_descriptors)) {
-        fprintf(stderr, "Failed to prepare child pipes: local_id=%d\n", id);
-        close_pipes(processes_count, pipes_descriptors);
+int execute_child(ProcessState *state) {
+    if (child_phase_1(state)) {
+        fprintf(stderr, "(%d) Failed to execute first phase!\n", state->id);
+        cleanup_pipes(state);
         return 1;
     }
-
-    if (child_phase_1(&process_info)) {
-        fprintf(stderr, "Failed to execute first child phase: local_id=%d\n", id);
-        cleanup_pipes(&process_info);
+    if (child_phase_2(state)) {
+        fprintf(stderr, "(%d) Failed to execute second phase!\n", state->id);
+        cleanup_pipes(state);
         return 2;
     }
-    if (child_phase_2(&process_info)) {
-        fprintf(stderr, "Failed to execute second child phase: local_id=%d\n", id);
-        cleanup_pipes(&process_info);
+    if (child_phase_3(state)) {
+        fprintf(stderr, "(%d) Failed to execute third phase!\n", state->id);
+        cleanup_pipes(state);
         return 3;
     }
-    if (child_phase_3(&process_info)) {
-        fprintf(stderr, "Failed to execute third child phase: local_id=%d\n", id);
-        cleanup_pipes(&process_info);
-        return 4;
-    }
 
-    cleanup_pipes(&process_info);
+    cleanup_pipes(state);
 
     return 0;
 }
 
-int execute_parent() {
-    ProcessInfo process_info;
-
-    process_info.id = PARENT_ID;
-    process_info.processes_count = processes_count;
-
-    if (prepare_pipes(&process_info, pipes_descriptors)) {
-        fprintf(stderr, "Failed to prepare parent pipes\n");
-        close_pipes(processes_count, pipes_descriptors);
+int execute_parent(ProcessState *state) {
+    if (parent_phase_1(state)) {
+        fprintf(stderr, "Failed to execute first parent phase\n");
+        cleanup_pipes(state);
         return 1;
     }
-
-    if (parent_phase_1(&process_info)) {
-        fprintf(stderr, "Failed to execute first parent phase\n");
-        cleanup_pipes(&process_info);
+    if (parent_phase_2(state)) {
+        fprintf(stderr, "Failed to execute second parent phase\n");
+        cleanup_pipes(state);
         return 2;
     }
-    if (parent_phase_2(&process_info)) {
-        fprintf(stderr, "Failed to execute second parent phase\n");
-        cleanup_pipes(&process_info);
+    if (parent_phase_3(state)) {
+        fprintf(stderr, "Failed to execute third parent phase\n");
+        cleanup_pipes(state);
         return 3;
     }
-    if (parent_phase_3(&process_info)) {
-        fprintf(stderr, "Failed to execute third parent phase\n");
-        cleanup_pipes(&process_info);
-        return 4;
-    }
 
-    cleanup_pipes(&process_info);
+    cleanup_pipes(state);
 
     return 0;
 }

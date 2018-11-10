@@ -1,4 +1,5 @@
 #include "distributed.h"
+#include "core.h"
 
 #ifndef PA1_PIPES_H
 #define PA1_PIPES_H
@@ -12,7 +13,7 @@
  * @param pipes_descriptors matrix for pipes descriptors
  * @return 0 if success
  */
-int init_pipes(long processes_count, int pipes_descriptors[TOTAL_PROCESSES][TOTAL_PROCESSES * 2]);
+int init_pipes(ProcessState *state, int pipes_descriptors[TOTAL_PROCESSES][TOTAL_PROCESSES * 2]);
 
 /**
  * Closes all opened pipes descriptors.
@@ -20,22 +21,22 @@ int init_pipes(long processes_count, int pipes_descriptors[TOTAL_PROCESSES][TOTA
  * @param processes_count a count of child processes
  * @param pipes_descriptors matrix of pipes descriptors
  */
-void close_pipes(long processes_count, int pipes_descriptors[TOTAL_PROCESSES][TOTAL_PROCESSES * 2]);
+void close_pipes(ProcessState *state, int pipes_descriptors[TOTAL_PROCESSES][TOTAL_PROCESSES * 2]);
 
 /**
  * Initializes process info reading and writing pipes descriptors and closes unused.
  *
- * @param process_info a process info
+ * @param state a state of current process
  * @param pipes_descriptors pipes descriptors
  * @return 0 if success
  */
-int prepare_pipes(ProcessInfo *process_info, int pipes_descriptors[TOTAL_PROCESSES][TOTAL_PROCESSES * 2]);
+int prepare_pipes(ProcessState *state, int pipes_descriptors[TOTAL_PROCESSES][TOTAL_PROCESSES * 2]);
 
 /**
  * Closes all opened pipes descriptors for child process.
  *
- * @param process_info a process info
+ * @param state a state of current process
  */
-void cleanup_pipes(ProcessInfo *process_info);
+void cleanup_pipes(ProcessState *state);
 
 #endif //PA1_PIPES_H

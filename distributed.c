@@ -5,91 +5,69 @@
 #include <errno.h>
 #include "distributed.h"
 #include "pa1.h"
-#include "logging.h"
 
-typedef struct {
-    ProcessInfo process_info;
-    local_id    to;
-    int16_t     type;
-    uint16_t    payload_len;
-    char        payload[MAX_PAYLOAD_LEN];
-} SendMessage;
-
-typedef struct {
-    ProcessInfo process_info;
-    local_id    sender;
-    int         available_to_send[MAX_PROCESS_ID];
-    Message     message;
-} ReceiveMessage;
-
-int broadcast_message(SendMessage *send_message);
-int receive_from_all(ReceiveMessage *receive_message, int16_t message_type);
-
+/**
+ * Serializes message to bytes.
+ *
+ * @param buffer a buffer for serialized message
+ * @param message a message to serialize
+ */
 void serialize_message(unsigned char *buffer, const Message *message);
+
+/**
+ * Deserializes header of received message.
+ *
+ * @param buffer a buffer with serialized header
+ * @param header a header that must be deserialized
+ */
 void deserialize_header(const unsigned char *buffer, MessageHeader *header);
 
-int broadcast_started(ProcessInfo *process_info) {
-    SendMessage send_message;
-    int payload_len;
-    char buffer[MAX_PAYLOAD_LEN];
-
-    send_message.process_info = *process_info;
-
-    payload_len = sprintf(buffer, log_started_fmt, process_info->id, getpid(), getppid());
-    send_message.type = STARTED;
-    send_message.payload_len = (uint16_t) payload_len;
-    memcpy(send_message.payload, buffer, (size_t) payload_len);
-
-    if (broadcast_message(&send_message)) {
-        fprintf(stderr, "(%d) Failed to broadcast STARTED event!\n", process_info->id);
-        return 1;
-    }
-    log_event(buffer);
-    return 0;
-}
-
-int broadcast_done(ProcessInfo *process_info) {
-    SendMessage send_message;
-    int payload_len;
-    char buffer[MAX_PAYLOAD_LEN];
-
-    send_message.process_info = *process_info;
-
-    payload_len = sprintf(buffer, log_done_fmt, process_info->id);
-    send_message.type = DONE;
-    send_message.payload_len = (uint16_t) payload_len;
-    memcpy(send_message.payload, buffer, (size_t) payload_len);
-
-    if (broadcast_message(&send_message)) {
-        fprintf(stderr, "(%d) Failed to broadcast DONE event!\n", process_info->id);
-        return 1;
-    }
-    log_event(buffer);
-    return 0;
-}
-
-int broadcast_message(SendMessage *send_message) {
+int broadcast_send(ProcessState *state, int message_type, const char *payload) {
     Message message;
 
     message.s_header.s_magic = MESSAGE_MAGIC;
-    message.s_header.s_type = send_message->type;
-    message.s_header.s_payload_len = send_message->payload_len;
+    message.s_header.s_type = (int16_t) message_type;
+    message.s_header.s_payload_len = (uint16_t) strlen(payload);
     message.s_header.s_local_time = 0;
-    memcpy(message.s_payload, send_message->payload, send_message->payload_len);
 
-    return send_multicast(&send_message->process_info, &message);
+    strcpy(message.s_payload, payload);
+
+    return send_multicast(state, &message);
+}
+
+int receive_from_all(ProcessState *state, int message_type) {
+    Message *message;
+
+    message = malloc(sizeof(Message));
+    for (local_id id = 1; id <= state->processes_count; ++id) {
+        if (id != state->id) {
+            if (receive(state, id, message)) {
+                fprintf(stderr, "(%d) Failed to receive message from: from=%d\n", state->id, id);
+                free(message);
+                return 1;
+            }
+            if (message->s_header.s_type != message_type) {
+                fprintf(stderr, "(%d) Message has incorrect type: type=%d\n", state->id, message->s_header.s_type);
+                free(message);
+                return 2;
+            }
+        }
+    }
+
+    free(message);
+    return 0;
 }
 
 int send_multicast(void *self, const Message *msg) {
-    ProcessInfo *process_info;
+    ProcessState *state;
     local_id id;
 
-    process_info = (ProcessInfo *) self;
+    state = (ProcessState *) self;
 
-    for (id = 0; id <= process_info->processes_count; ++id) {
-        if (id != process_info->id) {
-            if (send(process_info, id, msg)) {
-                fprintf(stderr, "(%d) Failed to write multicast message: to=%d\n", process_info->id, id);
+    for (id = 0; id <= state->processes_count; ++id) {
+        if (id != state->id) {
+            if (send(state, id, msg)) {
+                fprintf(stderr, "(%d) Failed to write multicast message: to=%d\n", state->id, id);
                 return 1;
             }
         }
@@ -101,16 +79,16 @@ int send_multicast(void *self, const Message *msg) {
 int send(void *self, local_id to, const Message *message) {
     size_t serialized_size;
     unsigned char buffer[MAX_PAYLOAD_LEN];
-    ProcessInfo *process_info;
+    ProcessState *state;
 
-    process_info = (ProcessInfo *) self;
+    state = (ProcessState *) self;
 
     serialize_message(buffer, message);
     serialized_size = sizeof(MessageHeader) + message->s_header.s_payload_len;
 
-    if (serialized_size != write(process_info->writing_pipes[to], buffer, serialized_size)) {
+    if (serialized_size != write(state->writing_pipes[to], buffer, serialized_size)) {
         fprintf(stderr, "(%d) Failed to send message to=%d (descriptor=%d) error=%s\n",
-                process_info->id, to, process_info->writing_pipes[to], strerror(errno));
+                state->id, to, state->writing_pipes[to], strerror(errno));
         return 1;
     }
 
@@ -133,91 +111,26 @@ void serialize_message(unsigned char *buffer, const Message *message) {
     memcpy(&buffer[8], message->s_payload, message->s_header.s_payload_len);
 }
 
-int receive_started(ProcessInfo *process_info) {
-    ReceiveMessage receive_message;
-    int i;
-    char buffer[MAX_PAYLOAD_LEN];
-
-    receive_message.process_info = *process_info;
-
-    for (i = 0; i <= process_info->processes_count; ++i) {
-        receive_message.available_to_send[i] = 1;
-    }
-
-    if (receive_from_all(&receive_message, STARTED)) {
-        fprintf(stderr, "(%d) Failed to receive all STARTED events!\n", process_info->id);
-        return 1;
-    }
-    sprintf(buffer, log_received_all_started_fmt, process_info->id);
-    log_event(buffer);
-    return 0;
-}
-
-int receive_done(ProcessInfo *process_info) {
-    ReceiveMessage receive_message;
-    int i;
-    char buffer[MAX_PAYLOAD_LEN];
-
-    receive_message.process_info = *process_info;
-
-    for (i = 0; i <= process_info->processes_count; ++i) {
-        receive_message.available_to_send[i] = 1;
-    }
-
-    if (receive_from_all(&receive_message, DONE)) {
-        fprintf(stderr, "(%d) Failed to receive all DONE events!\n", process_info->id);
-        return 1;
-    }
-    sprintf(buffer, log_received_all_done_fmt, process_info->id);
-    log_event(buffer);
-    return 0;
-}
-
-int receive_from_all(ReceiveMessage *receive_message, int16_t message_type) {
-    local_id id;
-    ProcessInfo process_info;
-
-    process_info = receive_message->process_info;
-    for (id = 1; id <= process_info.processes_count; ++id) {
-        if (id != process_info.id && receive_message->available_to_send[id]) {
-            Message *message;
-
-            message = &receive_message->message;
-            if (receive(&process_info, id, message)) {
-                fprintf(stderr, "(%d) Failed to receive message from: from=%d\n", process_info.id, id);
-                return 1;
-            }
-            if (message->s_header.s_type != message_type) {
-                fprintf(stderr, "(%d) Message has incorrect type: type=%d\n",
-                        process_info.id, message->s_header.s_type);
-                return 2;
-            }
-        }
-    }
-
-    return 0;
-}
-
 int receive(void *self, local_id from, Message *msg) {
-    ProcessInfo *process_info;
+    ProcessState *state;
     unsigned char buffer[MAX_MESSAGE_LEN];
     ssize_t bytes_read;
 
-    process_info = (ProcessInfo *) self;
-    while ((bytes_read = read(process_info->reading_pipes[from], buffer, sizeof(MessageHeader))) <= 0) {
+    state = (ProcessState *) self;
+    while ((bytes_read = read(state->reading_pipes[from], buffer, sizeof(MessageHeader))) <= 0) {
         if (bytes_read < 0) {
             fprintf(stderr, "(%d) Failed to read from pipe: descriptor=%d error=%s\n",
-                    process_info->id, process_info->reading_pipes[from], strerror(errno));
+                    state->id, state->reading_pipes[from], strerror(errno));
             return 1;
         }
     }
 
     deserialize_header(buffer, &msg->s_header);
 
-    while ((read(process_info->reading_pipes[from], msg->s_payload, msg->s_header.s_payload_len)) <= 0) {
+    while ((bytes_read = read(state->reading_pipes[from], msg->s_payload, msg->s_header.s_payload_len)) <= 0) {
         if (bytes_read < 0) {
             fprintf(stderr, "(%d) Failed to read from pipe: descriptor=%d error=%s\n",
-                    process_info->id, process_info->reading_pipes[from], strerror(errno));
+                    state->id, state->reading_pipes[from], strerror(errno));
             return 2;
         }
     }
