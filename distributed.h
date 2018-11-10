@@ -3,7 +3,7 @@
 
 #include "ipc.h"
 
-#define TOTAL_PROCESSES MAX_PROCESS_ID + 1
+#define TOTAL_PROCESSES (MAX_PROCESS_ID + 1)
 
 /**
  * Struct that describes an executing process.

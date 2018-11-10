@@ -2,6 +2,7 @@
 #include <unistd.h>
 #include <string.h>
 #include <stdlib.h>
+#include <errno.h>
 #include "distributed.h"
 #include "pa1.h"
 #include "logging.h"
@@ -88,7 +89,7 @@ int send_multicast(void *self, const Message *msg) {
     for (id = 0; id <= process_info->processes_count; ++id) {
         if (id != process_info->id) {
             if (send(process_info, id, msg)) {
-                fprintf(stderr, "(%d) ailed to write multicast message: to=%d\n", process_info->id, id);
+                fprintf(stderr, "(%d) Failed to write multicast message: to=%d\n", process_info->id, id);
                 return 1;
             }
         }
@@ -108,7 +109,8 @@ int send(void *self, local_id to, const Message *message) {
     serialized_size = sizeof(MessageHeader) + message->s_header.s_payload_len;
 
     if (serialized_size != write(process_info->writing_pipes[to], buffer, serialized_size)) {
-        fprintf(stderr, "(%d) Failed to send message to=%d\n", process_info->id, to);
+        fprintf(stderr, "(%d) Failed to send message to=%d (descriptor=%d) error=%s\n",
+                process_info->id, to, process_info->writing_pipes[to], strerror(errno));
         return 1;
     }
 
@@ -199,13 +201,26 @@ int receive_from_all(ReceiveMessage *receive_message, int16_t message_type) {
 int receive(void *self, local_id from, Message *msg) {
     ProcessInfo *process_info;
     unsigned char buffer[MAX_MESSAGE_LEN];
+    ssize_t bytes_read;
 
     process_info = (ProcessInfo *) self;
-    while (!read(process_info->reading_pipes[from], buffer, sizeof(MessageHeader)));
+    while ((bytes_read = read(process_info->reading_pipes[from], buffer, sizeof(MessageHeader))) <= 0) {
+        if (bytes_read < 0) {
+            fprintf(stderr, "(%d) Failed to read from pipe: descriptor=%d error=%s\n",
+                    process_info->id, process_info->reading_pipes[from], strerror(errno));
+            return 1;
+        }
+    }
 
     deserialize_header(buffer, &msg->s_header);
 
-    while (!read(process_info->reading_pipes[from], msg->s_payload, msg->s_header.s_payload_len));
+    while ((read(process_info->reading_pipes[from], msg->s_payload, msg->s_header.s_payload_len)) <= 0) {
+        if (bytes_read < 0) {
+            fprintf(stderr, "(%d) Failed to read from pipe: descriptor=%d error=%s\n",
+                    process_info->id, process_info->reading_pipes[from], strerror(errno));
+            return 2;
+        }
+    }
 
     return 0;
 }

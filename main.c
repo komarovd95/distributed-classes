@@ -6,6 +6,7 @@
 #include <sys/wait.h>
 #include <errno.h>
 #include <stdarg.h>
+#include <fcntl.h>
 #include "ipc.h"
 #include "pipes.h"
 #include "distributed.h"
@@ -30,7 +31,7 @@ int execute_parent();
 
 long processes_count;
 int pipes_descriptors[TOTAL_PROCESSES][TOTAL_PROCESSES * 2];
-FILE *evt_log, *pd_log;
+int evt_log, pd_log;
 
 int main(int argc, const char *argv[]) {
     local_id lid;
@@ -47,21 +48,23 @@ int main(int argc, const char *argv[]) {
         return 2;
     }
 
-    pd_log = fopen(pipes_log, "a");
-    if (!pd_log) {
+    pd_log = open(pipes_log, O_WRONLY | O_APPEND | O_CREAT, 0777);
+    if (pd_log < 0) {
         fprintf(stderr, "Failed to open pipes log!\n");
         return 3;
     }
 
     if (init_pipes(processes_count, pipes_descriptors)) {
         fprintf(stderr, "Failed to initialize pipes descriptors!\n");
+        close(pd_log);
         return 4;
     }
 
-    evt_log = fopen(events_log, "a");
-    if (!evt_log) {
+    evt_log = open(events_log, O_WRONLY | O_APPEND | O_CREAT, 0777);
+    if (evt_log < 0) {
         fprintf(stderr, "Failed to open events log!\n");
-        cleanup_pipes(processes_count, pipes_descriptors);
+        close_pipes(processes_count, pipes_descriptors);
+        close(pd_log);
         return 5;
     }
 
@@ -75,12 +78,12 @@ int main(int argc, const char *argv[]) {
         } else if (!pid) {
             if (execute_child(lid)) {
                 fprintf(stderr, "Failed to execute child: local_id=%d\n", lid);
-                fclose(pd_log);
-                fclose(evt_log);
+                close(pd_log);
+                close(evt_log);
                 return 1;
             }
-            fclose(pd_log);
-            fclose(evt_log);
+            close(pd_log);
+            close(evt_log);
             return 0;
         }
     }
@@ -92,8 +95,8 @@ int main(int argc, const char *argv[]) {
         result = -1;
     }
 
-    fclose(pd_log);
-    fclose(evt_log);
+    close(pd_log);
+    close(evt_log);
 
     for (int i = 1; i < lid; ++i) {
         pid_t pid;
@@ -119,19 +122,17 @@ int main(int argc, const char *argv[]) {
 
 void log_pipe(const char *fmt, ...) {
     va_list args;
+    char buffer[1024];
 
     va_start(args, fmt);
-    vfprintf(pd_log, fmt, args);
-    fflush(pd_log);
+    vsprintf(buffer, fmt, args);
+    write(pd_log, buffer, strlen(buffer));
     va_end(args);
 }
 
 void log_event(const char *message) {
-    fprintf(evt_log, "%s", message);
-    fflush(evt_log);
-
+    write(evt_log, message, strlen(message));
     printf("%s", message);
-    fflush(stdout);
 }
 
 int execute_child(local_id id) {
@@ -140,29 +141,29 @@ int execute_child(local_id id) {
     process_info.id = id;
     process_info.processes_count = processes_count;
 
-    if (prepare_child_pipes(&process_info, pipes_descriptors)) {
+    if (prepare_pipes(&process_info, pipes_descriptors)) {
         fprintf(stderr, "Failed to prepare child pipes: local_id=%d\n", id);
-        cleanup_pipes(processes_count, pipes_descriptors);
+        close_pipes(processes_count, pipes_descriptors);
         return 1;
     }
 
     if (child_phase_1(&process_info)) {
         fprintf(stderr, "Failed to execute first child phase: local_id=%d\n", id);
-        cleanup_child_pipes(&process_info);
+        cleanup_pipes(&process_info);
         return 2;
     }
     if (child_phase_2(&process_info)) {
         fprintf(stderr, "Failed to execute second child phase: local_id=%d\n", id);
-        cleanup_child_pipes(&process_info);
+        cleanup_pipes(&process_info);
         return 3;
     }
     if (child_phase_3(&process_info)) {
         fprintf(stderr, "Failed to execute third child phase: local_id=%d\n", id);
-        cleanup_child_pipes(&process_info);
+        cleanup_pipes(&process_info);
         return 4;
     }
 
-    cleanup_child_pipes(&process_info);
+    cleanup_pipes(&process_info);
 
     return 0;
 }
@@ -173,29 +174,29 @@ int execute_parent() {
     process_info.id = PARENT_ID;
     process_info.processes_count = processes_count;
 
-    if (prepare_parent_pipes(&process_info, pipes_descriptors)) {
+    if (prepare_pipes(&process_info, pipes_descriptors)) {
         fprintf(stderr, "Failed to prepare parent pipes\n");
-        cleanup_pipes(processes_count, pipes_descriptors);
+        close_pipes(processes_count, pipes_descriptors);
         return 1;
     }
 
     if (parent_phase_1(&process_info)) {
         fprintf(stderr, "Failed to execute first parent phase\n");
-        cleanup_parent_pipes(&process_info);
+        cleanup_pipes(&process_info);
         return 2;
     }
     if (parent_phase_2(&process_info)) {
         fprintf(stderr, "Failed to execute second parent phase\n");
-        cleanup_parent_pipes(&process_info);
+        cleanup_pipes(&process_info);
         return 3;
     }
     if (parent_phase_3(&process_info)) {
         fprintf(stderr, "Failed to execute third parent phase\n");
-        cleanup_parent_pipes(&process_info);
+        cleanup_pipes(&process_info);
         return 4;
     }
 
-    cleanup_parent_pipes(&process_info);
+    cleanup_pipes(&process_info);
 
     return 0;
 }

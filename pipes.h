@@ -12,7 +12,7 @@
  * @param pipes_descriptors matrix for pipes descriptors
  * @return 0 if success
  */
-int init_pipes(long processes_count, int pipes_descriptor[TOTAL_PROCESSES][TOTAL_PROCESSES * 2]);
+int init_pipes(long processes_count, int pipes_descriptors[TOTAL_PROCESSES][TOTAL_PROCESSES * 2]);
 
 /**
  * Closes all opened pipes descriptors.
@@ -20,38 +20,22 @@ int init_pipes(long processes_count, int pipes_descriptor[TOTAL_PROCESSES][TOTAL
  * @param processes_count a count of child processes
  * @param pipes_descriptors matrix of pipes descriptors
  */
-void cleanup_pipes(long processes_count, int pipes_descriptors[TOTAL_PROCESSES][TOTAL_PROCESSES * 2]);
+void close_pipes(long processes_count, int pipes_descriptors[TOTAL_PROCESSES][TOTAL_PROCESSES * 2]);
 
 /**
- * Initializes process info reading and writing pipes descriptors for child process and closes unused.
+ * Initializes process info reading and writing pipes descriptors and closes unused.
  *
  * @param process_info a process info
  * @param pipes_descriptors pipes descriptors
  * @return 0 if success
  */
-int prepare_child_pipes(ProcessInfo *process_info, int pipes_descriptors[TOTAL_PROCESSES][TOTAL_PROCESSES * 2]);
+int prepare_pipes(ProcessInfo *process_info, int pipes_descriptors[TOTAL_PROCESSES][TOTAL_PROCESSES * 2]);
 
 /**
  * Closes all opened pipes descriptors for child process.
  *
  * @param process_info a process info
  */
-void cleanup_child_pipes(ProcessInfo *process_info);
-
-/**
- * Initializes process info reading and writing pipes descriptors for parent process and closes unused.
- *
- * @param process_info a process info
- * @param pipes_descriptors pipes descriptors
- * @return 0 if success
- */
-int prepare_parent_pipes(ProcessInfo *process_info, int pipes_descriptors[TOTAL_PROCESSES][TOTAL_PROCESSES * 2]);
-
-/**
- * Closes all opened pipes descriptors for parent process.
- *
- * @param process_info a process info
- */
-void cleanup_parent_pipes(ProcessInfo *process_info);
+void cleanup_pipes(ProcessInfo *process_info);
 
 #endif //PA1_PIPES_H
