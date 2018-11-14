@@ -4,7 +4,13 @@
 #include <stdlib.h>
 #include <errno.h>
 #include "distributed.h"
-#include "pa1.h"
+#include "pa2345.h"
+#include "banking.h"
+
+typedef struct {
+    ProcessState state;
+    local_id     sender;
+} ReceiveAny;
 
 /**
  * Serializes message to bytes.
@@ -22,39 +28,53 @@ void serialize_message(unsigned char *buffer, const Message *message);
  */
 void deserialize_header(const unsigned char *buffer, MessageHeader *header);
 
-int broadcast_send(ProcessState *state, int message_type, const char *payload) {
+int send_message(ProcessState *state, local_id to, int message_type, size_t payload_len, const char *payload) {
     Message message;
 
     message.s_header.s_magic = MESSAGE_MAGIC;
     message.s_header.s_type = (int16_t) message_type;
-    message.s_header.s_payload_len = (uint16_t) strlen(payload);
-    message.s_header.s_local_time = 0;
+    message.s_header.s_payload_len = (uint16_t) payload_len;
+    message.s_header.s_local_time = get_lamport_time();
 
-    strcpy(message.s_payload, payload);
+    memcpy(message.s_payload, payload, payload_len);
 
-    return send_multicast(state, &message);
+    return send(state, to, &message);
 }
 
-int receive_from_all(ProcessState *state, int message_type) {
-    Message *message;
+int receive_from_any(ProcessState *state, local_id *sender, int *message_type, size_t *payload_len, char *payload) {
+    Message message;
+    ReceiveAny s_receive;
 
-    message = malloc(sizeof(Message));
-    for (local_id id = 1; id <= state->processes_count; ++id) {
-        if (id != state->id) {
-            if (receive(state, id, message)) {
-                fprintf(stderr, "(%d) Failed to receive message from: from=%d\n", state->id, id);
-                free(message);
-                return 1;
-            }
-            if (message->s_header.s_type != message_type) {
-                fprintf(stderr, "(%d) Message has incorrect type: type=%d\n", state->id, message->s_header.s_type);
-                free(message);
-                return 2;
-            }
-        }
+    s_receive.state = *state;
+    if (receive_any(&s_receive, &message)) {
+        fprintf(stderr, "(%d) Failed to receive any message!\n", state->id);
+        return 1;
+    }
+    on_message_received(message.s_header.s_local_time);
+
+    *message_type = message.s_header.s_type;
+    *payload_len = message.s_header.s_payload_len;
+    *sender = s_receive.sender;
+    if (payload != NULL) {
+        memcpy(payload, message.s_payload, *payload_len);
     }
 
-    free(message);
+    return 0;
+}
+
+int receive_from(ProcessState *state, local_id sender, int *message_type, char *payload) {
+    Message message;
+
+    if (receive(state, sender, &message)) {
+        fprintf(stderr, "(%d) Failed to receive message from: from=%d\n", state->id, sender);
+        return 1;
+    }
+    on_message_received(message.s_header.s_local_time);
+
+    *message_type = message.s_header.s_type;
+    if (payload != NULL) {
+        memcpy(payload, message.s_payload, message.s_header.s_payload_len);
+    }
     return 0;
 }
 
@@ -80,16 +100,25 @@ int send(void *self, local_id to, const Message *message) {
     size_t serialized_size;
     unsigned char buffer[MAX_PAYLOAD_LEN];
     ProcessState *state;
+    ssize_t bytes_written;
 
     state = (ProcessState *) self;
 
     serialize_message(buffer, message);
     serialized_size = sizeof(MessageHeader) + message->s_header.s_payload_len;
 
-    if (serialized_size != write(state->writing_pipes[to], buffer, serialized_size)) {
+    while ((bytes_written = write(state->writing_pipes[to], buffer, serialized_size)) < 0) {
+        if (errno != EAGAIN) {
+            fprintf(stderr, "(%d) Failed to send message to=%d (descriptor=%d) error=%s\n",
+                    state->id, to, state->writing_pipes[to], strerror(errno));
+            return 1;
+        }
+    }
+
+    if (serialized_size != bytes_written) {
         fprintf(stderr, "(%d) Failed to send message to=%d (descriptor=%d) error=%s\n",
                 state->id, to, state->writing_pipes[to], strerror(errno));
-        return 1;
+        return 2;
     }
 
     return 0;
@@ -118,17 +147,31 @@ int receive(void *self, local_id from, Message *msg) {
 
     state = (ProcessState *) self;
     while ((bytes_read = read(state->reading_pipes[from], buffer, sizeof(MessageHeader))) <= 0) {
-        if (bytes_read < 0) {
+        if (bytes_read < 0 && errno != EAGAIN) {
             fprintf(stderr, "(%d) Failed to read from pipe: descriptor=%d error=%s\n",
                     state->id, state->reading_pipes[from], strerror(errno));
             return 1;
         }
     }
 
+    if (bytes_read != sizeof(MessageHeader)) {
+        fprintf(stderr, "(%d) Failed to read from pipe: descriptor=%d bytes_read=%ld\n",
+                state->id, state->reading_pipes[from], bytes_read);
+        return 2;
+    }
+
     deserialize_header(buffer, &msg->s_header);
 
-    while ((bytes_read = read(state->reading_pipes[from], msg->s_payload, msg->s_header.s_payload_len)) <= 0) {
-        if (bytes_read < 0) {
+    if (msg->s_header.s_payload_len) {
+        while ((bytes_read = read(state->reading_pipes[from], msg->s_payload, msg->s_header.s_payload_len)) <= 0) {
+            if (bytes_read < 0 && errno != EAGAIN) {
+                fprintf(stderr, "(%d) Failed to read from pipe: descriptor=%d error=%s\n",
+                        state->id, state->reading_pipes[from], strerror(errno));
+                return 2;
+            }
+        }
+
+        if (bytes_read != msg->s_header.s_payload_len) {
             fprintf(stderr, "(%d) Failed to read from pipe: descriptor=%d error=%s\n",
                     state->id, state->reading_pipes[from], strerror(errno));
             return 2;
@@ -136,6 +179,56 @@ int receive(void *self, local_id from, Message *msg) {
     }
 
     return 0;
+}
+
+int receive_any(void *self, Message *msg) {
+    ReceiveAny *s_receive;
+    ProcessState *state;
+    unsigned char buffer[MAX_MESSAGE_LEN];
+    ssize_t bytes_read;
+
+    s_receive = (ReceiveAny *) self;
+    state = &s_receive->state;
+    while (1) {
+        for (local_id id = 0; id <= state->processes_count; ++id) {
+            if (id != state->id) {
+                bytes_read = read(state->reading_pipes[id], buffer, sizeof(MessageHeader));
+                if (bytes_read < 0 && errno != EAGAIN) {
+                    fprintf(stderr, "(%d) Failed to read from pipe: descriptor=%d error=%s\n",
+                            state->id, state->reading_pipes[id], strerror(errno));
+                    return 1;
+                }
+                if (bytes_read > 0) {
+                    if (bytes_read != sizeof(MessageHeader)) {
+                        fprintf(stderr, "(%d) Failed to read from pipe: descriptor=%d bytes_read=%ld\n",
+                                state->id, state->reading_pipes[id], bytes_read);
+                        return 2;
+                    }
+                    deserialize_header(buffer, &msg->s_header);
+
+                    if (msg->s_header.s_payload_len) {
+                        while ((bytes_read = read(state->reading_pipes[id], msg->s_payload, msg->s_header.s_payload_len)) <= 0) {
+                            if (bytes_read < 0 && errno != EAGAIN) {
+                                fprintf(stderr, "(%d) Failed to read from pipe: descriptor=%d error=%s\n",
+                                        state->id, state->reading_pipes[id], strerror(errno));
+                                return 2;
+                            }
+                        }
+
+                        if (bytes_read != msg->s_header.s_payload_len) {
+                            fprintf(stderr, "(%d) Failed to read from pipe: descriptor=%d error=%s\n",
+                                    state->id, state->reading_pipes[id], strerror(errno));
+                            return 2;
+                        }
+                    }
+
+                    s_receive->sender = id;
+
+                    return 0;
+                }
+            }
+        }
+    }
 }
 
 void deserialize_header(const unsigned char *buffer, MessageHeader *header) {
@@ -160,4 +253,15 @@ void deserialize_header(const unsigned char *buffer, MessageHeader *header) {
     header->s_payload_len = payload_len;
     header->s_type = type;
     header->s_local_time = local_time;
+}
+
+void construct_message(Message *message, int message_type, size_t payload_len, const char *payload) {
+    message->s_header.s_magic = MESSAGE_MAGIC;
+    message->s_header.s_payload_len = (uint16_t) payload_len;
+    message->s_header.s_type = (int16_t) message_type;
+    message->s_header.s_local_time = get_lamport_time();
+
+    if (payload_len) {
+        memcpy(message->s_payload, payload, payload_len);
+    }
 }

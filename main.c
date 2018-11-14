@@ -13,6 +13,7 @@
 #include "common.h"
 #include "phases.h"
 #include "core.h"
+#include "banking.h"
 
 /**
  * Joins created processes.
@@ -37,17 +38,29 @@ int execute_child(ProcessState *state);
  */
 int execute_parent(ProcessState *state);
 
+timestamp_t local_time;
+
 int main(int argc, const char *argv[]) {
     long processes_count;
     int pipes_descriptors[TOTAL_PROCESSES][TOTAL_PROCESSES * 2];
     int evt_log, pd_log;
     ProcessState parent_state;
+    balance_t balances[TOTAL_PROCESSES];
 
-    if (argc != 3 || strcmp(argv[1], "-p") != 0) {
-        fprintf(stderr, "Usage %s -p X, where X is number of child processes.\n", argv[0]);
+    if (argc < 3 || strcmp(argv[1], "-p") != 0) {
+        fprintf(stderr, "Usage %s -p X balance1 balance2 ... balanceX, where X is number of child processes.\n", argv[0]);
         return 1;
     }
     processes_count = strtol(argv[2], NULL, 10);
+
+    if (argc != (processes_count + 3)) {
+        fprintf(stderr, "Usage %s -p X balance1 balance2 ... balanceX, where X is number of child processes.\n", argv[0]);
+        return 1;
+    }
+
+    for (int i = 0; i < processes_count; ++i) {
+        balances[i + 1] = (balance_t) strtol(argv[i + 3], NULL, 10);
+    }
 
     if (processes_count > MAX_PROCESS_ID) {
         fprintf(stderr, "Too much processes to create: actual=%ld limit=%d\n", processes_count, MAX_PROCESS_ID);
@@ -78,6 +91,8 @@ int main(int argc, const char *argv[]) {
         return 5;
     }
 
+    local_time = 0;
+
     for (local_id id = 1; id <= processes_count; ++id) {
         pid_t pid;
 
@@ -97,6 +112,17 @@ int main(int argc, const char *argv[]) {
             process_state.processes_count = processes_count;
             process_state.evt_log = evt_log;
             process_state.pd_log = pd_log;
+            process_state.done_received = 0;
+            process_state.balance = balances[id];
+
+            process_state.history.s_id = id;
+            process_state.history.s_history_len = 2;
+            process_state.history.s_history[0].s_time = get_lamport_time();
+            process_state.history.s_history[0].s_balance_pending_in = 0;
+            process_state.history.s_history[0].s_balance = balances[id];
+            process_state.history.s_history[1].s_time = 1;
+            process_state.history.s_history[1].s_balance_pending_in = 0;
+            process_state.history.s_history[1].s_balance = balances[id];
 
             if (prepare_pipes(&process_state, pipes_descriptors)) {
                 fprintf(stderr, "(%d) Failed to prepare pipes.\n", id);
@@ -210,4 +236,23 @@ int execute_parent(ProcessState *state) {
     cleanup_pipes(state);
 
     return 0;
+}
+
+timestamp_t get_lamport_time() {
+    return local_time;
+}
+
+void on_message_send(void) {
+    local_time++;
+}
+
+void on_message_received(timestamp_t message_time) {
+    if (message_time > local_time) {
+        local_time = message_time;
+    }
+    local_time++;
+}
+
+void set_lamport_time(timestamp_t new_time) {
+    local_time = new_time;
 }
