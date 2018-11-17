@@ -1,4 +1,3 @@
-#include "distributed.h"
 #include "core.h"
 
 #ifndef PA1_PIPES_H

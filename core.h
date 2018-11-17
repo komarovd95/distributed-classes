@@ -21,6 +21,8 @@ typedef struct {
     BalanceHistory history;                       ///< History of balance
 } ProcessState;
 
+void construct_message(Message *message, int message_type, size_t payload_len, const char *payload);
+
 /**
  * Logs occurred event to log file.
  *

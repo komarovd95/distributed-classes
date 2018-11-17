@@ -9,7 +9,6 @@
 #include <fcntl.h>
 #include "ipc.h"
 #include "pipes.h"
-#include "distributed.h"
 #include "common.h"
 #include "phases.h"
 #include "core.h"
@@ -84,6 +83,7 @@ int main(int argc, const char *argv[]) {
     parent_state.processes_count = processes_count;
     parent_state.evt_log = evt_log;
     parent_state.pd_log = pd_log;
+    parent_state.done_received = 0;
 
     if (init_pipes(&parent_state, pipes_descriptors)) {
         fprintf(stderr, "Failed to initialize pipes descriptors!\n");
@@ -116,13 +116,10 @@ int main(int argc, const char *argv[]) {
             process_state.balance = balances[id];
 
             process_state.history.s_id = id;
-            process_state.history.s_history_len = 2;
+            process_state.history.s_history_len = 1;
             process_state.history.s_history[0].s_time = get_lamport_time();
             process_state.history.s_history[0].s_balance_pending_in = 0;
             process_state.history.s_history[0].s_balance = balances[id];
-            process_state.history.s_history[1].s_time = 1;
-            process_state.history.s_history[1].s_balance_pending_in = 0;
-            process_state.history.s_history[1].s_balance = balances[id];
 
             if (prepare_pipes(&process_state, pipes_descriptors)) {
                 fprintf(stderr, "(%d) Failed to prepare pipes.\n", id);
@@ -251,8 +248,4 @@ void on_message_received(timestamp_t message_time) {
         local_time = message_time;
     }
     local_time++;
-}
-
-void set_lamport_time(timestamp_t new_time) {
-    local_time = new_time;
 }
