@@ -130,7 +130,18 @@ int main(int argc, const char *argv[]) {
             }
 
             process_state.use_mutex = use_mutex;
-            process_state.queue.length = 0;
+
+            for (int i = 1; i <= processes_count; ++i) {
+                if (i > id) {
+                    process_state.forks[i].is_controlled = 1;
+                    process_state.forks[i].is_dirty = 1;
+                    process_state.forks[i].has_request = 0;
+                } else if (i < id) {
+                    process_state.forks[i].is_controlled = 0;
+                    process_state.forks[i].is_dirty = 0;
+                    process_state.forks[i].has_request = 1;
+                }
+            }
 
             if (prepare_pipes(&process_state, pipes_descriptors)) {
                 fprintf(stderr, "(%d) Failed to prepare pipes.\n", id);

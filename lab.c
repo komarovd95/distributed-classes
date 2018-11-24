@@ -9,13 +9,11 @@
 
 int broadcast_started(ProcessState *state);
 int broadcast_done(ProcessState *state);
-int broadcast_cs_request(ProcessState *state);
-int broadcast_cs_release(ProcessState *state);
 int receive_started_from_all(ProcessState *state);
 int receive_done_from_all(ProcessState *state);
 
-int process_self_cs_request(ProcessState *state, const CsRequest *sent_request, int *reply_received);
-int process_received_cs_request(ProcessState *state, const CsRequest *request);
+int process_controlled_fork(ProcessState *state, local_id id);
+int process_uncontrolled_fork(ProcessState *state, local_id id);
 
 int child_phase_1(ProcessState *state) {
     if (broadcast_started(state)) {
@@ -45,13 +43,6 @@ int child_phase_2(ProcessState *state) {
             fprintf(stderr, "(%d) Failed to release CS!\n", state->id);
             return 2;
         }
-
-//        printf("(%d) Queue: ", state->id);
-//        for (int j = 1; j < state->queue.length; ++j) {
-//            printf("(%d, %d), ", state->queue.requests[j].timestamp, state->queue.requests[j].process_id);
-//        }
-//        printf("(%d, %d)\n", state->queue.requests[state->queue.length].timestamp, state->queue.requests[state->queue.length].process_id);
-//        fflush(stdout);
     }
     return 0;
 }
@@ -186,203 +177,181 @@ void transfer(void * parent_data, local_id src, local_id dst, balance_t amount) 
 
 int request_cs(const void * self) {
     ProcessState *state;
-    int reply_received[MAX_PROCESS_ID];
-    CsRequest sent_request, q_request;
+    int fork_received[MAX_PROCESS_ID];
+    int forks_received;
 
     state = (ProcessState *) self;
     if (state->use_mutex == 0) {
         return 0;
     }
 
-    memcpy(reply_received, state->done_received, MAX_PROCESS_ID * sizeof(int));
+    memcpy(fork_received, state->done_received, sizeof(int) * MAX_PROCESS_ID);
 
-    on_message_send();
-
-    sent_request.timestamp = get_lamport_time();
-    sent_request.process_id = state->id;
-    sent_request.replied = 0;
-
-    if (enqueue(&state->queue, &sent_request)) {
-        fprintf(stderr, "(%d) Failed to enqueue sent CS requests: time=%d\n", state->id, get_lamport_time());
-        return 1;
-    }
-    if (broadcast_cs_request(state)) {
-        fprintf(stderr, "(%d) Failed to broadcast CS requests!\n", state->id);
-        return 2;
-    }
-
-    while (1) {
-        if (peek(&state->queue, &q_request)) {
-            fprintf(stderr, "(%d) Failed to peek top of requests queue!\n", state->id);
-            return 3;
-        }
-
-        if (q_request.process_id == state->id) {
-            int process_result;
-            if ((process_result = process_self_cs_request(state, &sent_request, reply_received)) > 0) {
-                fprintf(stderr, "(%d) Failed to process self CS request!\n", state->id);
-                return 4;
-            }
-            if (!process_result) {
-                return 0;
-            }
-        } else if (process_received_cs_request(state, &q_request)) {
-            fprintf(stderr, "(%d) Failed to process received CS request: from=%d!\n", state->id, q_request.process_id);
-            return 5;
+    forks_received = 0;
+    for (int i = 1; i <= state->processes_count; ++i) {
+        if (i != state->id) {
+            forks_received += state->done_received[i];
         }
     }
+
+    while (forks_received < (state->processes_count - 1)) {
+        for (local_id id = 1; id <= state->processes_count; ++id) {
+            if (id != state->id && !fork_received[id]) {
+//                printf("(%d) Forks: ", state->id);
+//                for (int i = 1; i <= state->processes_count; ++i) {
+//                    if (i != state->id) {
+//                        printf("(%d, %d, %d) ", state->forks[i].is_controlled, state->forks[i].is_dirty, state->forks[i].has_request);
+//                    } else {
+//                        printf("(-1, -1, -1) ");
+//                    }
+//                }
+//                printf("\n");
+
+
+                if (state->forks[id].is_controlled) {
+                    if (process_controlled_fork(state, id)) {
+                        fprintf(stderr, "(%d) Failed to process controlled fork: id=%d\n", state->id, id);
+                        return 1;
+                    }
+                } else {
+                    if (process_uncontrolled_fork(state, id)) {
+                        fprintf(stderr, "(%d) Failed to process uncontrolled fork: id=%d\n", state->id, id);
+                        return 2;
+                    }
+                }
+
+                fork_received[id] = (state->forks[id].is_controlled && !state->forks[id].is_dirty);
+                forks_received += fork_received[id];
+            }
+        }
+    }
+
+    for (int i = 1; i <= state->processes_count; ++i) {
+        if (i != state->id) {
+            state->forks[i].is_dirty = 1;
+        }
+    }
+    return 0;
 }
 
 int release_cs(const void * self) {
     ProcessState *state;
+    Message message;
 
     state = (ProcessState *) self;
     if (state->use_mutex == 0) {
         return 0;
     }
 
-    if (broadcast_cs_release(state)) {
-        fprintf(stderr, "(%d) Failed to broadcast CS release!\n", state->id);
-        return 1;
-    }
-    if (dequeue(&state->queue, NULL)) {
-        fprintf(stderr, "(%d) Failed to dequeue self CS request!\n", state->id);
-        return 2;
-    }
-    return 0;
-}
-
-int broadcast_cs_request(ProcessState *state) {
-    Message message;
-
-    construct_message(&message, CS_REQUEST, 0, NULL);
     for (local_id id = 1; id <= state->processes_count; ++id) {
         if (id != state->id && !state->done_received[id]) {
-            if (send(state, id, &message)) {
-                fprintf(stderr, "(%d) Failed to send CS request: to=%d\n", state->id, id);
+            if (receive(state, id, &message)) {
+                fprintf(stderr, "(%d) Failed to receive message (RELEASE) from: %d\n", state->id, id);
                 return 1;
+            }
+            on_message_received(message.s_header.s_local_time);
+
+            switch (message.s_header.s_type) {
+                case CS_REQUEST:
+                    state->forks[id].has_request = 1;
+
+                    on_message_send();
+                    construct_message(&message, CS_REPLY, 0, NULL);
+                    if (send(state, id, &message)) {
+                        fprintf(stderr, "(%d) Failed to send CS reply to: %d\n", state->id, id);
+                        return 1;
+                    }
+                    state->forks[id].is_controlled = 0;
+                    state->forks[id].is_dirty = 0;
+                    break;
+                case DONE:
+                    state->done_received[id] = 1;
+                    state->forks[id].is_controlled = 1;
+                    state->forks[id].is_dirty = 0;
+                    state->forks[id].has_request = 0;
+                    break;
+
+                default:
+                    fprintf(stderr, "(%d) Unknown type (DIRTY stage): %d\n", state->id, message.s_header.s_type);
+                    return 3;
             }
         }
     }
     return 0;
 }
 
-int broadcast_cs_release(ProcessState *state) {
+int process_controlled_fork(ProcessState *state, local_id id) {
     Message message;
 
-    construct_message(&message, CS_RELEASE, 0, NULL);
-    for (local_id id = 1; id <= state->processes_count; ++id) {
-        if (id != state->id && !state->done_received[id]) {
-            if (send(state, id, &message)) {
-                fprintf(stderr, "(%d) Failed to send CS release: to=%d\n", state->id, id);
-                return 1;
-            }
+    if (state->forks[id].has_request) {
+        on_message_send();
+        construct_message(&message, CS_REPLY, 0, NULL);
+        if (send(state, id, &message)) {
+            fprintf(stderr, "(%d) Failed to send CS reply to: %d\n", state->id, id);
+            return 1;
+        }
+        state->forks[id].is_controlled = 0;
+        state->forks[id].is_dirty = 0;
+    } else {
+        if (receive(state, id, &message)) {
+            fprintf(stderr, "(%d) Failed to receive CS request from: %d\n", state->id, id);
+            return 2;
+        }
+        on_message_received(message.s_header.s_local_time);
+
+        switch (message.s_header.s_type) {
+            case CS_REQUEST:
+                state->forks[id].has_request = 1;
+                break;
+            case DONE:
+                state->done_received[id] = 1;
+                state->forks[id].is_controlled = 1;
+                state->forks[id].is_dirty = 0;
+                state->forks[id].has_request = 0;
+                break;
+
+            default:
+                fprintf(stderr, "(%d) Unknown type (DIRTY stage): %d\n", state->id, message.s_header.s_type);
+                return 3;
         }
     }
     return 0;
 }
 
-int process_self_cs_request(ProcessState *state, const CsRequest *sent_request, int *reply_received) {
-    Message message;
-    CsRequest received_request;
-    int should_continue;
-    int replies_received;
-
-    replies_received = 0;
-    for (int i = 1; i <= state->processes_count; ++i) {
-        if (i != state->id) {
-            replies_received += reply_received[i];
-        }
-    }
-
-    should_continue = 1;
-    while (replies_received < (state->processes_count - 1) && should_continue) {
-        for (local_id id = 1; id <= state->processes_count; ++id) { //&& should_continue; ++id) {
-            if (id != state->id && !reply_received[id]) {
-                if (receive(state, id, &message)) {
-                    fprintf(stderr, "(%d) Failed to receive CS message: from=%d\n", state->id, id);
-                    return 1;
-                }
-                on_message_received(message.s_header.s_local_time);
-    
-                switch (message.s_header.s_type) {
-                    case CS_REPLY:
-//                        printf("(%d) Receive reply: %d\n", state->id, id);
-                        reply_received[id] = 1;
-                        replies_received++;
-                        break;
-    
-                    case CS_REQUEST:
-                        received_request.timestamp = message.s_header.s_local_time;
-                        received_request.process_id = id;
-    
-                        if (timestamp_compare(sent_request, &received_request) >= 0) {
-                            should_continue = 0;
-                        }
-//                        printf("(%d) Enqueue: %d\n", state->id, id);
-                        if (enqueue(&state->queue, &received_request)) {
-                            fprintf(stderr, "(%d) Failed to enqueue received CS requests: from=%d\n", state->id, id);
-                            return 2;
-                        }
-//                        printf("(%d) Queue: ", state->id);
-//                        for (int j = 1; j < state->queue.length; ++j) {
-//                            printf("(%d, %d), ", state->queue.requests[j].timestamp, state->queue.requests[j].process_id);
-//                        }
-//                        printf("(%d, %d)\n", state->queue.requests[state->queue.length].timestamp, state->queue.requests[state->queue.length].process_id);
-//                        fflush(stdout);
-                        break;
-    
-                    case DONE:
-                        reply_received[id] = 1;
-                        replies_received++;
-                        state->done_received[id] = 1;
-                        break;
-    
-                    default:
-                        fprintf(stderr, "(%d) Unknown message type: from=%d type=%d\n", state->id, id, message.s_header.s_type);
-                        return 3;
-                }
-            }
-        }
-    }
-
-    if (should_continue) {
-        return 0;
-    }
-    return -1;
-}
-
-int process_received_cs_request(ProcessState *state, const CsRequest *request) {
+int process_uncontrolled_fork(ProcessState *state, local_id id) {
     Message message;
 
-//    printf("(%d) Process: %d\n", state->id, request->process_id);
+    if (state->forks[id].has_request) {
+        on_message_send();
+        construct_message(&message, CS_REQUEST, 0, NULL);
+        if (send(state, id, &message)) {
+            fprintf(stderr, "(%d) Failed to send CS request to: %d\n", state->id, id);
+            return 1;
+        }
+        state->forks[id].has_request = 0;
+    } else {
+        if (receive(state, id, &message)) {
+            fprintf(stderr, "(%d) Failed to receive CS reply from: %d\n", state->id, id);
+            return 2;
+        }
+        on_message_received(message.s_header.s_local_time);
 
-    on_message_send();
-    construct_message(&message, CS_REPLY, 0, NULL);
-    if (send(state, request->process_id, &message)) {
-        fprintf(stderr, "(%d) Failed to send CS reply: to=%d\n", state->id, request->process_id);
-        return 1;
-    }
+        switch (message.s_header.s_type) {
+            case CS_REPLY:
+                state->forks[id].is_controlled = 1;
+                state->forks[id].is_dirty = 0;
+                break;
+            case DONE:
+                state->done_received[id] = 1;
+                state->forks[id].is_controlled = 1;
+                state->forks[id].is_dirty = 0;
+                state->forks[id].has_request = 0;
+                break;
 
-    if (receive(state, request->process_id, &message)) {
-        fprintf(stderr, "(%d) Failed to receive CS message: from=%d\n", state->id, request->process_id);
-        return 2;
+            default:
+                fprintf(stderr, "(%d) Unknown type (REPLY stage): %d\n", state->id, message.s_header.s_type);
+                return 3;
+        }
     }
-
-    if (message.s_header.s_type != CS_RELEASE) {
-        fprintf(stderr, "(%d) Failed to receive RELEASE event: from=%d type=%d!\n",
-                state->id, request->process_id, message.s_header.s_type);
-        return 3;
-    }
-    if (dequeue(&state->queue, NULL)) {
-        fprintf(stderr, "(%d) Failed to dequeue REQUEST event: from=%d\n", state->id, request->process_id);
-        return 4;
-    }
-//    printf("(%d) De-Queue: ", state->id);
-//    for (int j = 1; j < state->queue.length; ++j) {
-//        printf("(%d, %d), ", state->queue.requests[j].timestamp, state->queue.requests[j].process_id);
-//    }
-//    printf("(%d, %d)\n", state->queue.requests[state->queue.length].timestamp, state->queue.requests[state->queue.length].process_id);
-//    fflush(stdout);
     return 0;
 }

@@ -4,6 +4,7 @@
 #include "ipc.h"
 #include "banking.h"
 #include "queue.h"
+#include "forks.h"
 
 #define TOTAL_PROCESSES (MAX_PROCESS_ID + 1)
 
@@ -19,12 +20,10 @@ typedef struct {
     int      pd_log;                        ///< Pipes events log file descriptor
     int      done_received[MAX_PROCESS_ID]; ///< Count of DONE events received
     int      use_mutex;                     ///< 1 if critical section is used
-    Queue    queue;                         ///< Priority queue for CS requests
+    Fork     forks[MAX_PROCESS_ID];         ///< Array with forks controls
 } ProcessState;
 
 void construct_message(Message *message, int message_type, size_t payload_len, const char *payload);
-
-local_id try_receive(ProcessState *state, Message *message);
 
 /**
  * Logs occurred event to log file.
