@@ -1,3 +1,8 @@
 *.out
 *.log
+*.tar.gz
 .vscode
+.idea
+*.iml
+cmake-build-debug
+CMakeLists.txt
