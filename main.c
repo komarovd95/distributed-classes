@@ -43,22 +43,35 @@ int main(int argc, const char *argv[]) {
     long processes_count;
     int pipes_descriptors[TOTAL_PROCESSES][TOTAL_PROCESSES * 2];
     int evt_log, pd_log;
+    int use_mutex;
     ProcessState parent_state;
-    balance_t balances[TOTAL_PROCESSES];
 
-    if (argc < 3 || strcmp(argv[1], "-p") != 0) {
-        fprintf(stderr, "Usage %s -p X balance1 balance2 ... balanceX, where X is number of child processes.\n", argv[0]);
+    use_mutex = 0;
+
+    if (argc < 3) {
+        fprintf(stderr, "Usage %s -p X [--mutexl], where X is number of child processes.\n", argv[0]);
         return 1;
     }
-    processes_count = strtol(argv[2], NULL, 10);
-
-    if (argc != (processes_count + 3)) {
-        fprintf(stderr, "Usage %s -p X balance1 balance2 ... balanceX, where X is number of child processes.\n", argv[0]);
+    if (strcmp(argv[1], "-p") == 0) {
+        processes_count = strtol(argv[2], NULL, 10);
+        if (argc == 4) {
+            if (strcmp(argv[3], "--mutexl") == 0) {
+                use_mutex = 1;
+            } else {
+                fprintf(stderr, "Usage %s -p X [--mutexl], where X is number of child processes.\n", argv[0]);
+                return 1;
+            }
+        }
+    } else if (strcmp(argv[1], "--mutexl") == 0) {
+        use_mutex = 1;
+        if (argc != 4) {
+            fprintf(stderr, "Usage %s -p X [--mutexl], where X is number of child processes.\n", argv[0]);
+            return 1;
+        }
+        processes_count = strtol(argv[3], NULL, 10);
+    } else {
+        fprintf(stderr, "Usage %s -p X [--mutexl], where X is number of child processes.\n", argv[0]);
         return 1;
-    }
-
-    for (int i = 0; i < processes_count; ++i) {
-        balances[i + 1] = (balance_t) strtol(argv[i + 3], NULL, 10);
     }
 
     if (processes_count > MAX_PROCESS_ID) {
@@ -83,7 +96,6 @@ int main(int argc, const char *argv[]) {
     parent_state.processes_count = processes_count;
     parent_state.evt_log = evt_log;
     parent_state.pd_log = pd_log;
-    parent_state.done_received = 0;
 
     if (init_pipes(&parent_state, pipes_descriptors)) {
         fprintf(stderr, "Failed to initialize pipes descriptors!\n");
@@ -112,14 +124,13 @@ int main(int argc, const char *argv[]) {
             process_state.processes_count = processes_count;
             process_state.evt_log = evt_log;
             process_state.pd_log = pd_log;
-            process_state.done_received = 0;
-            process_state.balance = balances[id];
 
-            process_state.history.s_id = id;
-            process_state.history.s_history_len = 1;
-            process_state.history.s_history[0].s_time = get_lamport_time();
-            process_state.history.s_history[0].s_balance_pending_in = 0;
-            process_state.history.s_history[0].s_balance = balances[id];
+            for (int i = 0; i <= processes_count; ++i) {
+                process_state.done_received[i] = 0;
+            }
+
+            process_state.use_mutex = use_mutex;
+            process_state.queue.length = 0;
 
             if (prepare_pipes(&process_state, pipes_descriptors)) {
                 fprintf(stderr, "(%d) Failed to prepare pipes.\n", id);
