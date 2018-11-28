@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <errno.h>
 #include <string.h>
+#include <fcntl.h>
 #include "pipes.h"
 
 int init_pipes(ProcessState *state, int pipes_descriptors[TOTAL_PROCESSES][TOTAL_PROCESSES * 2]) {
@@ -16,6 +17,15 @@ int init_pipes(ProcessState *state, int pipes_descriptors[TOTAL_PROCESSES][TOTAL
                 }
                 log_pipe(state, "Create pipe: from=%d to=%d descriptors=[%d, %d]\n",
                         i, j, pipes_descriptors[i][j * 2], pipes_descriptors[i][j * 2 + 1]);
+
+                if (fcntl(pipes_descriptors[i][j * 2], F_SETFL, O_NONBLOCK) < 0) {
+                    fprintf(stderr, "Failed to set non-blocking mode for read end of pipe: error=%s\n", strerror(errno));
+                    return 2;
+                }
+                if (fcntl(pipes_descriptors[i][j * 2 + 1], F_SETFL, O_NONBLOCK) < 0) {
+                    fprintf(stderr, "Failed to set non-blocking mode for write end of pipe: error=%s\n", strerror(errno));
+                    return 3;
+                }
             }
         }
     }
