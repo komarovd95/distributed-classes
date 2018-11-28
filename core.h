@@ -3,9 +3,17 @@
 
 #include "ipc.h"
 #include "banking.h"
-#include "queue.h"
 
 #define TOTAL_PROCESSES (MAX_PROCESS_ID + 1)
+
+/**
+ * A structure that represents a fork entity.
+ */
+typedef struct {
+    int is_controlled; ///< 1 means that this fork belongs to current process.
+    int is_dirty;      ///< 1 means that this fork is dirty.
+    int has_request;   ///< 1 means that this fork was requested.
+} Fork;
 
 /**
  * A state of current process.
@@ -19,7 +27,7 @@ typedef struct {
     int      pd_log;                        ///< Pipes events log file descriptor
     int      done_received[MAX_PROCESS_ID]; ///< Count of DONE events received
     int      use_mutex;                     ///< 1 if critical section is used
-    Queue    queue;                         ///< Priority queue for CS requests
+    Fork     forks[MAX_PROCESS_ID];         ///< Array with forks controls
 } ProcessState;
 
 /**
@@ -57,15 +65,5 @@ void on_message_send(void);
  * Process message receive event: update scalar clock.
  */
 void on_message_received(const Message *message);
-
-/**
- * Compares two critical section requests.
- *
- * @param a first CS request
- * @param b other CS request
- * @return 0 if a and b are equal, any value less than 0 if a < b
-           and any value greater than 0 if a > b
- */
-int cs_request_compare(const CsRequest *a, const CsRequest *b);
 
 #endif //PA1_CORE_H

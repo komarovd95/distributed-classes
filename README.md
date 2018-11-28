@@ -22,7 +22,7 @@ Just
 ### Implementation details and requirements
 
 This project implements simple distributed mutual exclusion algorithm using
-IPC library implemented [previously](https://github.com/komarovd95/distributed-classes/tree/feature/lab0-pa3):
+IPC library implemented [previously](https://github.com/komarovd95/distributed-classes/tree/feature/lab0-pa4):
 1. Main (parent) process spawns `X` child processes (child).
 2. Each child broadcasts `STARTED` event.
 3. Each child and parent wait for all `STARTED` events.
@@ -43,29 +43,32 @@ Implementation requirements:
 * all processes must be single-threaded
 * [Lamport's Scalar Clock](https://en.wikipedia.org/wiki/Lamport_timestamps)
   should be used for sending and receiving messages (no internal events)
-* [Lamport's Distributed Mutual Exclusion Algorithm](https://en.wikipedia.org/wiki/Lamport%27s_distributed_mutual_exclusion_algorithm)
+* [Dining Philosophers Mutual Exclusion Algorithm](https://en.wikipedia.org/wiki/Dining_philosophers_problem)
   should be used
 
 #### Mutual exclusion algorithm
 
+In this algorithm abstract resources called `forks` are used to gain access to 
+CS. Fork is described below:
+* fork is a mutual resource between 2 processes
+* fork has clean/dirty flag which means that fork was used in CS
+* fork has request token which services for CS reply needs
+
 ##### Entering CS
 
-To request CS each child process broadcasts `CS_REQUEST` event. When such event
-received it is enqueued into CS requests queue. This queue is prioritized by
-request timestamp and sender's local PID.
+To enter CS each child process should gain access to all mutual forks with other 
+processes. If fork is not controlled by current process and not yet requested,
+process should send `CS_REQUEST` to mutual process.
 
-When not an own CS request is at top of local queue `CS_REPLY` event should be
-sent to sender of current top CS request.
+When process receives `CS_REQUEST` event must give away controlled fork by 
+sending `CS_REPLY` event only when fork is dirty. 
 
 Process can enter CS when 2 conditions are satisfied:
-1. Process own CS request is at top of local queue.
-2. All `CS_REPLY` events are received.
+1. Process controls all mutual forks.
+2. All controlled forks are clean.
 
-When this conditions are satisfied process is allowed to enter the CS.
-
-##### Leaving CS
-
-To leave CS process broadcasts `CS_RELEASE` event.
+When this conditions are satisfied process is allowed to enter the CS. After CS
+entering all controlled forks become dirty.
 
 ### Message format
 
@@ -104,9 +107,6 @@ teacher).
 `pipes.h` contains definitions of functions that create and close pipes (provided
 by me)
 
-`queue.h` contains definitions of functions and structures that are needed to
-implement CS requests priority queue (provided by me)
-
 #### C files
 
 All C files are written by me.
@@ -118,8 +118,6 @@ All C files are written by me.
 `main.c` contains spawning and waiting processes. Program entry point.
 
 `pipes.c` contains implementation of pipes operations (create and close).
-
-`queue.c` contains implementation of CS requests priority queue.
 
 #### Bash Scripts
 
