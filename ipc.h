@@ -1,19 +1,16 @@
 /**
  * @file     ipc.h
  * @Author   Michael Kosyakov and Evgeniy Ivanov (ifmo.distributedclass@gmail.com)
- * @date     March, 2014
+ * @date     September, 2013
  * @brief    A simple IPC library for programming assignments
  *
- * Students must not modify this file!
  */
 
-#ifndef __IFMO_DISTRIBUTED_CLASS_IPC__H
-#define __IFMO_DISTRIBUTED_CLASS_IPC__H
+#ifndef IFMO_DISTRIBUTED_CLASS__IPC__H
+#define IFMO_DISTRIBUTED_CLASS__IPC__H
 
 #include <stddef.h>
 #include <stdint.h>
-
-//------------------------------------------------------------------------------
 
 typedef int8_t local_id;
 typedef int16_t timestamp_t;
@@ -31,17 +28,23 @@ typedef enum {
     ACK,             ///< empty message
     STOP,            ///< empty message
     TRANSFER,        ///< message with TransferOrder
-    BALANCE_HISTORY, ///< message with BalanceHistory
-    CS_REQUEST,      ///< empty message
-    CS_REPLY,        ///< empty message
-    CS_RELEASE       ///< empty message
+    BALANCE_HISTORY, ///< UNUSED message with BalanceHistory 
+    CS_REQUEST,      ///< UNUSED empty message
+    CS_REPLY,        ///< UNUSED empty message
+    CS_RELEASE,       ///< UNUSED empty message
+    BALANCE_STATE,      /* message with BalanceState structure
+                        or only send its balance */
+    SNAPSHOT_VTIME,   // message with future time of snapshot
+    SNAPSHOT_ACK,     // empty message
+    EMPTY               // yep, it also empty
 } MessageType;
 
 typedef struct {
     uint16_t     s_magic;        ///< magic signature, must be MESSAGE_MAGIC
     uint16_t     s_payload_len;  ///< length of payload
     int16_t      s_type;         ///< type of the message
-    timestamp_t  s_local_time;   ///< set by sender, time in PA3
+    timestamp_t  s_local_time;   ///< UNUSED 
+    timestamp_t s_local_timevector[MAX_PROCESS_ID + 1]; // time for vector clock
 } __attribute__((packed)) MessageHeader;
 
 enum {
@@ -51,26 +54,20 @@ enum {
 typedef struct {
     MessageHeader s_header;
     char s_payload[MAX_PAYLOAD_LEN]; ///< Must be used as a buffer, unused "tail"
-                                     ///< shouldn't be transferred
+                                     ///< shouldn't be transfered
 } __attribute__((packed)) Message;
 
-//------------------------------------------------------------------------------
-
-/** Send a message to the process specified by id.
+/** Send message to process specified by id.
  *
  * @param self    Any data structure implemented by students to perform I/O
- * @param dst     ID of recipient
- * @param msg     Message to send
- *
- * @return 0 on success, any non-zero value on error
+ * @param dst     ID of recepient
+ * @param msg     Message to send.
  */
 int send(void * self, local_id dst, const Message * msg);
 
-//------------------------------------------------------------------------------
-
 /** Send multicast message.
  *
- * Send msg to all other processes including parent.
+ * Send msg to all other processes including parrent.
  * Should stop on the first error.
  * 
  * @param self    Any data structure implemented by students to perform I/O
@@ -79,8 +76,6 @@ int send(void * self, local_id dst, const Message * msg);
  * @return 0 on success, any non-zero value on error
  */
 int send_multicast(void * self, const Message * msg);
-
-//------------------------------------------------------------------------------
 
 /** Receive a message from the process specified by id.
  *
@@ -94,8 +89,6 @@ int send_multicast(void * self, const Message * msg);
  */
 int receive(void * self, local_id from, Message * msg);
 
-//------------------------------------------------------------------------------
-
 /** Receive a message from any process.
  *
  * Receive a message from any process, in case of blocking I/O should be used
@@ -108,6 +101,7 @@ int receive(void * self, local_id from, Message * msg);
  */
 int receive_any(void * self, Message * msg);
 
+
 //------------------------------------------------------------------------------
 
-#endif // __IFMO_DISTRIBUTED_CLASS_IPC__H
+#endif // IFMO_DISTRIBUTED_CLASS__IPC__H

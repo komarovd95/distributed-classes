@@ -1,11 +1,10 @@
-/**
- * @file     bank_robbery.c
- * @Author   Michael Kosyakov and Evgeniy Ivanov (ifmo.distributedclass@gmail.com)
- * @date     March, 2014
- * @brief    Toy implementation of bank_robbery(), don't do it in real life ;)
+/* IFMO Distributed Class, autumn 2013
  *
- * Students must not modify this file!
+ * bank_robbery.c
+ * Provided for testing purposes only!
+ * In tests another implementation is used.
  */
+
 
 #include "banking.h"
 
@@ -13,8 +12,12 @@ void bank_robbery(void * parent_data, local_id max_id)
 {
     for (int i = 1; i < max_id; ++i) {
         transfer(parent_data, i, i + 1, i);
+        if (i % 2) {
+            total_sum_snapshot();
+        }
     }
     if (max_id > 1) {
         transfer(parent_data, max_id, 1, 1);
+        total_sum_snapshot();
     }
 }

@@ -36,13 +36,18 @@ implemented [previously](https://github.com/komarovd95/distributed-classes/tree/
 6. Transfer target (child) receives `TRANSFER` event and processes it:
    * increment own balance by transfer amount
    * send `ACK` event to bank broker
-7. After all processed transfers bank broker broadcasts `STOP` event.
-8. Each child broadcasts `DONE` event (no useful work for simplicity).
-9. Each child and parent process wait for all `DONE` events.
-10. Each bank branch sends to bank broker `BALANCE_HISTORY` event.
-11. Bank broker waits for all `BALANCE_HISTORY` event and prints history summary
-    for all bank branches.
-12. Parent waits until children are shutting down.
+7. Sometimes between transfers bank broker calculates balance between
+   bank branches:
+   * bank broker broadcasts `SNAPSHOT_VTIME` with future time (local clock doesn't change)
+   * every bank branch saves incoming time for balance snapshot
+   * every bank branch responds with `SNAPSHOT_ACK` message (local clock doesn't change)
+   * bank broker sends `EMPTY` messages to branches to gain up their local clocks
+   * when balance snapshot is coming every bank branch sends `BALANCE_STATE` message to
+     bank broker
+8. After all processed transfers bank broker broadcasts `STOP` event.
+9. Each child broadcasts `DONE` event (no useful work for simplicity).
+10. Each child and parent process wait for all `DONE` events.
+11. Parent waits until children are shutting down.
 
 Implementation requirements:
 * for child spawning `fork()` should be used.
@@ -53,27 +58,25 @@ Implementation requirements:
 * all unused pipes should be closed
 * all processes must log events and pipes operations (creating and closing)
 * all processes must be single-threaded
-* [Lamport's Scalar Clock](https://en.wikipedia.org/wiki/Lamport_timestamps)
+* [Vector Clock](https://en.wikipedia.org/wiki/Vector_clock)
   should be used for sending and receiving messages (no internal events)
 * Transfer can be initiated only by bank broker
 * Transfers can not be processed by bank branch after receiving `STOP` event
-* _Processing transfers_ should be counted in balance history (pending balance).
-  _Processing transfer_ is transfer that processed by source at `A` timestamp
-  and received by target at `B` timestamp, where `A < B`
 
 ### Message format
 
 Every message is represented by byte-buffer while transferred and has the 
 following format:
 
-| Byte position   | Content                                                |
-|-----------------|--------------------------------------------------------|
-| 0-1             | `MESSAGE_MAGIC` constant that used to validate message |
-| 2-3             | One of the following types of message: `STARTED`,      |
-|                 | `TRANSFER`, `ACK`, `STOP`, `DONE`, `BALANCE_HISTORY`   |
-| 4-5             | Length of message payload (may be 0)                   |
-| 6-7             | Message Lamport's Scalar Clock timestamp               |
-| 8-PayloadLength | Message payload                                        |
+| Byte position                          | Content                                                |
+|----------------------------------------|--------------------------------------------------------|
+| 0-1                                    | `MESSAGE_MAGIC` constant that used to validate message |
+| 2-3                                    | One of the following types of message: `STARTED`,      |
+|                                        | `TRANSFER`, `ACK`, `STOP`, `DONE`, `BALANCE_STATE`,    |
+|                                        | `SNAPSHOT_VTIME`, `SNAPSHOT_ACK`, `EMPTY`              |
+| 4-5                                    | Length of message payload (may be 0)                   |
+| 5-(5 + 2 * ProcessesCount)             | Vector clock                                           |
+| (5 + 2 * ProcessesCount)-PayloadLength | Message payload                                        |
 
 ### Project structure
 
@@ -121,8 +124,3 @@ parent process (provided by teacher).
 `dist.sh` is used to assemble tar archive with sources.
 
 `run.sh` is used to [run program](#how-to-build-and-run).
-
-#### Libraries
-
-`libruntime.so` is library that used to print history by parent process
-(provided by teacher).

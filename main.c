@@ -37,13 +37,12 @@ int execute_child(ProcessState *state);
  */
 int execute_parent(ProcessState *state);
 
-timestamp_t local_time;
+ProcessState parent_state;
 
 int main(int argc, const char *argv[]) {
     long processes_count;
     int pipes_descriptors[TOTAL_PROCESSES][TOTAL_PROCESSES * 2];
     int evt_log, pd_log;
-    ProcessState parent_state;
     balance_t balances[TOTAL_PROCESSES];
 
     if (argc < 3 || strcmp(argv[1], "-p") != 0) {
@@ -85,13 +84,15 @@ int main(int argc, const char *argv[]) {
     parent_state.pd_log = pd_log;
     parent_state.done_received = 0;
 
+    for (int i = 0; i <= processes_count; ++i) {
+        parent_state.vector_time[i] = 0;
+    }
+
     if (init_pipes(&parent_state, pipes_descriptors)) {
         fprintf(stderr, "Failed to initialize pipes descriptors!\n");
         close(pd_log);
         return 5;
     }
-
-    local_time = 0;
 
     for (local_id id = 1; id <= processes_count; ++id) {
         pid_t pid;
@@ -113,13 +114,11 @@ int main(int argc, const char *argv[]) {
             process_state.evt_log = evt_log;
             process_state.pd_log = pd_log;
             process_state.done_received = 0;
-            process_state.balance = balances[id];
 
-            process_state.history.s_id = id;
-            process_state.history.s_history_len = 1;
-            process_state.history.s_history[0].s_time = get_lamport_time();
-            process_state.history.s_history[0].s_balance_pending_in = 0;
-            process_state.history.s_history[0].s_balance = balances[id];
+            for (int i = 0; i <= processes_count; ++i) {
+                process_state.vector_time[i] = 0;
+            }
+            process_state.balance = balances[id];
 
             if (prepare_pipes(&process_state, pipes_descriptors)) {
                 fprintf(stderr, "(%d) Failed to prepare pipes.\n", id);
@@ -235,20 +234,26 @@ int execute_parent(ProcessState *state) {
     return 0;
 }
 
-timestamp_t get_lamport_time() {
-    return local_time;
+void on_message_send(ProcessState *state) {
+    state->vector_time[state->id]++;
 }
 
-void on_message_send(void) {
-    local_time++;
-}
+void on_message_received(ProcessState *state, const Message *message) {
+    timestamp_t vector_time[TOTAL_PROCESSES];
 
-void on_message_received(const Message *message) {
-    timestamp_t message_time;
+    memcpy(vector_time, message->s_header.s_local_timevector, sizeof(timestamp_t) * (state->processes_count + 1));
 
-    message_time = message->s_header.s_local_time;
-    if (message_time > local_time) {
-        local_time = message_time;
+    state->vector_time[state->id]++;
+    for (int i  = 0; i <= state->processes_count; ++i) {
+        if (state->vector_time[i] < vector_time[i]) {
+            state->vector_time[i] = vector_time[i];
+        }
     }
-    local_time++;
+}
+
+void total_sum_snapshot() {
+    if (calculate_total_balance(&parent_state)) {
+        fprintf(stderr, "Failed to calculate total balance!\n");
+        exit(1);
+    }
 }

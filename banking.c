@@ -8,25 +8,6 @@
 #include "pa2345.h"
 
 /**
- * Decrements own balance and records it in balance history.
- *
- * @param state a state of current process
- * @param amount a transfer amount
- * @return 0 if success
- */
-int do_decrement_balance(ProcessState *state, balance_t amount);
-
-/**
- * Increments own balance and records it in balance history.
- *
- * @param state a state of current process
- * @param time a timestamp when transfer has been processed by transfer source
- * @param amount a transfer amount
- * @return 0 if success
- */
-int do_increment_balance(ProcessState *state, timestamp_t time, balance_t amount);
-
-/**
  * Serializes balance record to byte-buffer.
  *
  * @param buffer a byte-buffer
@@ -76,8 +57,8 @@ void transfer(void *parent_data, local_id src, local_id dst, balance_t amount) {
 
     serialized_size = serialize_order(buffer, &transfer_order);
 
-    on_message_send();
-    construct_message(&message, TRANSFER, serialized_size, buffer);
+    on_message_send(state);
+    construct_message(state, &message, TRANSFER, serialized_size, buffer);
     if (send(state, src, &message)) {
         fprintf(stderr, "Failed to init transfer order: from=%d to=%d amount=%d\n", src, dst, amount);
         exit(5);
@@ -86,7 +67,7 @@ void transfer(void *parent_data, local_id src, local_id dst, balance_t amount) {
         fprintf(stderr, "Failed to receive message from destination process of transfer!\n");
         exit(6);
     }
-    on_message_received(&message);
+    on_message_received(state, &message);
 
     if (message.s_header.s_type != ACK) {
         fprintf(stderr, "Failed to receive ACK message from destination process!\n");
@@ -99,73 +80,74 @@ int process_transfer_out(ProcessState *state, TransferOrder *transfer_order) {
     char buffer[MAX_PAYLOAD_LEN];
     size_t serialized_size;
 
-    on_message_send();
-    if (do_decrement_balance(state, transfer_order->s_amount)) {
+    if (state->balance < transfer_order->s_amount) {
         return 1;
     }
+    state->balance -= transfer_order->s_amount;
+
+    on_message_send(state);
     sprintf(buffer, log_transfer_out_fmt,
-            get_lamport_time(), transfer_order->s_src, transfer_order->s_amount, transfer_order->s_dst);
+            state->vector_time[state->id], transfer_order->s_src, transfer_order->s_amount, transfer_order->s_dst);
     log_event(state, buffer);
 
     serialized_size = serialize_order(buffer, transfer_order);
 
-    construct_message(&message, TRANSFER, serialized_size, buffer);
+    construct_message(state, &message, TRANSFER, serialized_size, buffer);
     if (send(state, transfer_order->s_dst, &message)) {
         return 2;
     }
     return 0;
 }
 
-int process_transfer_in(ProcessState *state, timestamp_t time, TransferOrder *transfer_order) {
+int process_transfer_in(ProcessState *state, TransferOrder *transfer_order) {
     Message message;
     char buffer[MAX_PAYLOAD_LEN];
 
-    if (do_increment_balance(state, time, transfer_order->s_amount)) {
-        return 1;
-    }
+    state->balance += transfer_order->s_amount;
+
     sprintf(buffer, log_transfer_in_fmt,
-            get_lamport_time(), transfer_order->s_dst, transfer_order->s_amount, transfer_order->s_src);
+            state->vector_time[state->id], transfer_order->s_dst, transfer_order->s_amount, transfer_order->s_src);
     log_event(state, buffer);
 
-    on_message_send();
-    construct_message(&message, ACK, 0, NULL);
+    on_message_send(state);
+    construct_message(state, &message, ACK, 0, NULL);
     if (send(state, PARENT_ID, &message)) {
         return 2;
     }
     return 0;
 }
 
-int do_decrement_balance(ProcessState *state, balance_t amount) {
+int sync_balance(ProcessState *state, timestamp_t sync_time) {
+    Message message;
     BalanceState balance_state;
+    char buffer[MAX_PAYLOAD_LEN];
+    size_t serialized_size;
 
-    if (state->balance < amount) {
-        return 1;
+    while (state->vector_time[state->id] < sync_time) {
+        if (receive(state, PARENT_ID, &message)) {
+            fprintf(stderr, "(%d) Failed to receive message for time sync!\n", state->id);
+            return 1;
+        }
+        on_message_received(state, &message);
+
+        if (message.s_header.s_type != EMPTY) {
+            fprintf(stderr, "(%d) Failed to receive EMPTY message: type=%d!\n", state->id, message.s_header.s_type);
+            return 2;
+        }
     }
-    state->balance -= amount;
 
     balance_state.s_balance = state->balance;
-    balance_state.s_time = get_lamport_time();
-    balance_state.s_balance_pending_in = state->history.s_history[state->history.s_history_len - 1].s_balance_pending_in;
+    memcpy(balance_state.s_timevector, state->vector_time, sizeof(timestamp_t) * (state->processes_count + 1));
 
-    pad_history(&state->history, &balance_state);
+    serialized_size = serialize_balance_state(buffer, &balance_state);
 
-    return 0;
-}
-
-int do_increment_balance(ProcessState *state, timestamp_t time, balance_t amount) {
-    BalanceState balance_state;
-
-    state->balance += amount;
-
-    balance_state.s_time = get_lamport_time();
-    balance_state.s_balance = state->balance;
-    balance_state.s_balance_pending_in = 0;
-
-    pad_history(&state->history, &balance_state);
-
-    for (timestamp_t t = time; t < balance_state.s_time; ++t) {
-        state->history.s_history[t].s_balance_pending_in += amount;
+    on_message_send(state);
+    construct_message(state, &message, BALANCE_STATE, serialized_size, buffer);
+    if (send(state, PARENT_ID, &message)) {
+        fprintf(stderr, "(%d) Failed to send BALANCE STATE message!\n", state->id);
+        return 3;
     }
+
     return 0;
 }
 
@@ -223,49 +205,104 @@ void deserialize_balance_state(const char *buffer, BalanceState *state) {
     memcpy(&state->s_balance_pending_in, buffer + offset, sizeof(state->s_balance_pending_in));
 }
 
-size_t serialize_history(char *buffer, const BalanceHistory *history) {
-    size_t serialized_size;
+int calculate_total_balance(ProcessState *state) {
+    Message message;
+    BalanceState balance_state;
+    balance_t total_balance;
+    char buffer[MAX_PAYLOAD_LEN];
+    timestamp_t temp_time[TOTAL_PROCESSES];
+    timestamp_t received_time[TOTAL_PROCESSES];
+    timestamp_t snapshot_time;
 
-    memcpy(buffer, &history->s_id, sizeof(history->s_id));
-    serialized_size = sizeof(history->s_id);
+    memcpy(temp_time, state->vector_time, sizeof(timestamp_t) * (state->processes_count + 1));
 
-    memcpy(buffer + serialized_size, &history->s_history_len, sizeof(history->s_history_len));
-    serialized_size += sizeof(history->s_history_len);
-
-    for (int i = 0; i < history->s_history_len; ++i) {
-        serialized_size += serialize_balance_state(buffer + serialized_size, &history->s_history[i]);
+    on_message_send(state);
+    snapshot_time = state->vector_time[state->id];
+    construct_message(state, &message, SNAPSHOT_VTIME, 0, NULL);
+    if (send_multicast(state, &message)) {
+        fprintf(stderr, "(%d) Failed to multicast SNAPSHOT VTIME!\n", state->id);
+        return 1;
     }
-    return serialized_size;
-}
+    memcpy(state->vector_time, temp_time, sizeof(timestamp_t) * (state->processes_count + 1));
 
-void deserialize_history(const char *buffer, BalanceHistory *history) {
-    size_t offset;
-
-    memcpy(&history->s_id, buffer, sizeof(history->s_id));
-    offset = sizeof(history->s_id);
-
-    memcpy(&history->s_history_len, buffer + offset, sizeof(history->s_history_len));
-    offset += sizeof(history->s_history_len);
-
-    for (int i = 0; i < history->s_history_len; ++i) {
-        deserialize_balance_state(buffer + offset, &history->s_history[i]);
-        offset += BALANCE_STATE_SIZE;
-    }
-}
-
-void pad_history(BalanceHistory *history, const BalanceState *state) {
-    timestamp_t current_len;
-
-    current_len = history->s_history_len;
-    for (timestamp_t t = current_len; t < state->s_time; ++t) {
-        history->s_history[t].s_balance = history->s_history[current_len - 1].s_balance;
-        history->s_history[t].s_balance_pending_in = history->s_history[current_len - 1].s_balance_pending_in;
-        history->s_history[t].s_time = t;
+    for (local_id id = 1; id <= state->processes_count; ++id) {
+        if (receive(state, id, &message)) {
+            fprintf(stderr, "(%d) Failed to receive VTIME ACK message: from=%d\n", state->id, id);
+            return 2;
+        }
+        if (message.s_header.s_type != SNAPSHOT_ACK) {
+            fprintf(stderr, "(%d) Not a VTIME ACK received: from=%d type=%d\n", state->id, id, message.s_header.s_type);
+            return 3;
+        }
+        received_time[id] = message.s_header.s_local_timevector[id];
     }
 
-    history->s_history[state->s_time].s_balance = state->s_balance;
-    history->s_history[state->s_time].s_balance_pending_in = state->s_balance_pending_in;
-    history->s_history[state->s_time].s_time = state->s_time;
+    for (local_id id = 1; id <= state->processes_count; ++id) {
+        for (timestamp_t time = received_time[id]; time < snapshot_time; ++time) {
+            on_message_send(state);
+            construct_message(state, &message, EMPTY, 0, NULL);
+            if (send(state, id, &message)) {
+                fprintf(stderr, "(%d) Failed to send EMPTY message: to=%d\n", state->id, id);
+                return 4;
+            }
+        }
+    }
 
-    history->s_history_len = (uint8_t) (state->s_time + 1);
+    total_balance = 0;
+    for (local_id id = 1; id <= state->processes_count; ++id) {
+        if (receive(state, id, &message)) {
+            fprintf(stderr, "(%d) Failed to receive message on sync stage: from=%d\n", state->id, id);
+            return 5;
+        }
+        on_message_received(state, &message);
+
+        if (message.s_header.s_type != BALANCE_STATE) {
+            fprintf(stderr, "(%d) Failed to receive BALANCE STATE message: from=%d type=%d\n",
+                    state->id, id, message.s_header.s_type);
+            return 6;
+        }
+        deserialize_balance_state(message.s_payload, &balance_state);
+
+        total_balance += balance_state.s_balance;
+    }
+
+//    on_message_send(state);
+//    construct_message(state, &message, EMPTY, 0, NULL);
+//    if (send_multicast(state, &message)) {
+//        fprintf(stderr, "(%d) Failed to multicast EMPTY message!\n", state->id);
+//        return 4;
+//    }
+//
+//    total_balance = 0;
+//    for (local_id id = 1; id <= state->processes_count; ++id) {
+//        if (receive(state, id, &message)) {
+//            fprintf(stderr, "(%d) Failed to receive BALANCE STATE message: from=%d\n", state->id, id);
+//            return 5;
+//        }
+//        on_message_received(state, &message);
+//
+//        if (message.s_header.s_type != BALANCE_STATE) {
+//            fprintf(stderr, "(%d) Not a BALANCE STATE message was received: from=%d type=%d\n",
+//                    state->id, id, message.s_header.s_type);
+//            return 6;
+//        }
+//        deserialize_balance_state(buffer, &balance_state);
+//        total_balance += balance_state.s_balance;
+//    }
+    sprintf(buffer, format_vector_snapshot,
+            state->vector_time[0],
+            state->vector_time[1],
+            state->vector_time[2],
+            state->vector_time[3],
+            state->vector_time[4],
+            state->vector_time[5],
+            state->vector_time[6],
+            state->vector_time[7],
+            state->vector_time[8],
+            state->vector_time[9],
+            state->vector_time[10],
+            total_balance
+    );
+    log_event(state, buffer);
+    return 0;
 }

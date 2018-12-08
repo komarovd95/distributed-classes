@@ -7,7 +7,7 @@
 #include "pa2345.h"
 #include "banking.h"
 
-#define MESSAGE_HEADER_SIZE (sizeof(uint16_t) + sizeof(uint16_t) + sizeof(int16_t) + sizeof(timestamp_t))
+#define MESSAGE_HEADER_SIZE (sizeof(uint16_t) + sizeof(uint16_t) + sizeof(int16_t))
 
 /**
  * Serializes message to byte buffer.
@@ -80,9 +80,6 @@ size_t serialize_message(char *buffer, const Message *message) {
     memcpy(buffer + serialized_size, &message->s_header.s_payload_len, sizeof(message->s_header.s_payload_len));
     serialized_size += sizeof(message->s_header.s_payload_len);
 
-    memcpy(buffer + serialized_size, &message->s_header.s_local_time, sizeof(message->s_header.s_local_time));
-    serialized_size += sizeof(message->s_header.s_local_time);
-
     if (message->s_header.s_payload_len) {
         memcpy(&buffer[serialized_size], message->s_payload, message->s_header.s_payload_len);
     }
@@ -100,15 +97,13 @@ void deserialize_header(const char *buffer, MessageHeader *header) {
     offset += sizeof(header->s_type);
 
     memcpy(&header->s_payload_len, buffer + offset, sizeof(header->s_payload_len));
-    offset += sizeof(header->s_payload_len);
-
-    memcpy(&header->s_local_time, buffer + offset, sizeof(header->s_local_time));
 }
 
 int receive(void *self, local_id from, Message *msg) {
     ProcessState *state;
     char buffer[MAX_MESSAGE_LEN];
     ssize_t bytes_read;
+    size_t vector_size;
 
     state = (ProcessState *) self;
     while ((bytes_read = read(state->reading_pipes[from], buffer, MESSAGE_HEADER_SIZE)) <= 0) {
@@ -133,7 +128,7 @@ int receive(void *self, local_id from, Message *msg) {
         return 0;
     }
 
-    while ((bytes_read = read(state->reading_pipes[from], msg->s_payload, msg->s_header.s_payload_len)) <= 0) {
+    while ((bytes_read = read(state->reading_pipes[from], buffer, msg->s_header.s_payload_len)) <= 0) {
         if ((bytes_read < 0 && errno != EAGAIN) || bytes_read == 0) {
             fprintf(stderr, "(%d) Failed to read message payload from pipe: descriptor=%d error=%s\n",
                     state->id, state->reading_pipes[from], strerror(errno));
@@ -146,6 +141,11 @@ int receive(void *self, local_id from, Message *msg) {
                 state->id, from, bytes_read, msg->s_header.s_payload_len);
         return 4;
     }
+
+    vector_size = sizeof(timestamp_t) * (state->processes_count + 1);
+    memcpy(msg->s_header.s_local_timevector, buffer, vector_size);
+    memcpy(msg->s_payload, buffer + vector_size, bytes_read - vector_size);
+
     return 0;
 }
 
@@ -173,7 +173,9 @@ int receive_any(void *self, Message *msg) {
                     deserialize_header(buffer, &msg->s_header);
 
                     if (msg->s_header.s_payload_len > 0) {
-                        while ((bytes_read = read(state->reading_pipes[id], msg->s_payload, msg->s_header.s_payload_len)) <= 0) {
+                        size_t  vector_size;
+
+                        while ((bytes_read = read(state->reading_pipes[id], buffer, msg->s_header.s_payload_len)) <= 0) {
                             if ((bytes_read < 0 && errno != EAGAIN) || bytes_read == 0) {
                                 fprintf(stderr, "(%d) Failed to read message payload from pipe (any): descriptor=%d error=%s\n",
                                         state->id, state->reading_pipes[id], strerror(errno));
@@ -186,6 +188,10 @@ int receive_any(void *self, Message *msg) {
                                     state->id, state->reading_pipes[id], bytes_read);
                             return 4;
                         }
+
+                        vector_size = sizeof(timestamp_t) * (state->processes_count + 1);
+                        memcpy(msg->s_header.s_local_timevector, buffer, vector_size);
+                        memcpy(msg->s_payload, buffer + vector_size, bytes_read - vector_size);
                     }
 
                     return 0;
@@ -195,13 +201,20 @@ int receive_any(void *self, Message *msg) {
     }
 }
 
-void construct_message(Message *message, int message_type, size_t payload_len, const char *payload) {
+void construct_message(const ProcessState *state, Message *message, int message_type, size_t payload_len, const char *payload) {
+    size_t vector_size;
+
+    vector_size = sizeof(timestamp_t) * (state->processes_count + 1);
+
     message->s_header.s_magic = MESSAGE_MAGIC;
-    message->s_header.s_payload_len = (uint16_t) payload_len;
+    message->s_header.s_payload_len = (uint16_t) (payload_len + vector_size);
     message->s_header.s_type = (int16_t) message_type;
-    message->s_header.s_local_time = get_lamport_time();
+    message->s_header.s_local_time = 0;
+
+    memcpy(message->s_header.s_local_timevector, state->vector_time, vector_size);
+    memcpy(message->s_payload, state->vector_time, vector_size);
 
     if (payload_len) {
-        memcpy(message->s_payload, payload, payload_len);
+        memcpy(message->s_payload + vector_size, payload, payload_len);
     }
 }

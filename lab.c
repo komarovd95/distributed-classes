@@ -10,8 +10,6 @@ int broadcast_stop(ProcessState *state);
 int broadcast_done(ProcessState *state);
 int receive_started_from_all(ProcessState *state);
 int receive_done_from_all(ProcessState *state);
-int receive_history_from_all(ProcessState *state);
-int send_history(ProcessState *state);
 
 int process_transfer_message(ProcessState *state, const Message *message);
 
@@ -27,7 +25,7 @@ int child_phase_1(ProcessState *state) {
 
 int child_phase_2(ProcessState *state) {
     Message message;
-    BalanceState stop_state;
+    timestamp_t snapshot_time;
     int stopped;
 
     stopped = 0;
@@ -35,30 +33,39 @@ int child_phase_2(ProcessState *state) {
         if (receive_any(state, &message)) {
             return 1;
         }
-        on_message_received(&message);
 
         switch (message.s_header.s_type) {
             case TRANSFER:
+                on_message_received(state, &message);
                 if (process_transfer_message(state, &message)) {
                     fprintf(stderr, "(%d) Failed to process transfer message!\n", state->id);
                     return 2;
                 }
                 break;
             case STOP:
-                stop_state.s_time = message.s_header.s_local_time;
-                stop_state.s_balance = state->balance;
-                stop_state.s_balance_pending_in = state->history.s_history[state->history.s_history_len - 1].s_balance_pending_in;
-
-                pad_history(&state->history, &stop_state);
-
+                on_message_received(state, &message);
                 stopped = 1;
                 break;
+            case SNAPSHOT_VTIME:
+                snapshot_time = message.s_header.s_local_timevector[PARENT_ID];
+
+                construct_message(state, &message, SNAPSHOT_ACK, 0, NULL);
+                if (send(state, PARENT_ID, &message)) {
+                    fprintf(stderr, "(%d) Failed to send VTIME ACK!\n", state->id);
+                    return 3;
+                }
+                if (sync_balance(state, snapshot_time)) {
+                    fprintf(stderr, "(%d) Failed to sync balance\n", state->id);
+                    return 4;
+                }
+                break;
             case DONE:
+                on_message_received(state, &message);
                 state->done_received++;
                 break;
             default:
                 fprintf(stderr, "(%d) Unknown message type: %d\n", state->id, message.s_header.s_type);
-                return 2;
+                return 5;
         }
     }
     return 0;
@@ -75,7 +82,7 @@ int child_phase_3(ProcessState *state) {
         if (receive_any(state, &message)) {
             return 2;
         }
-        on_message_received(&message);
+        on_message_received(state, &message);
 
         switch (message.s_header.s_type) {
             case TRANSFER:
@@ -88,10 +95,6 @@ int child_phase_3(ProcessState *state) {
                 fprintf(stderr, "(%d) Unknown message type: %d\n", state->id, message.s_header.s_type);
                 return 3;
         }
-    }
-
-    if (send_history(state)) {
-        return 4;
     }
     return 0;
 }
@@ -115,9 +118,6 @@ int parent_phase_3(ProcessState *state) {
     if (receive_done_from_all(state)) {
         return 1;
     }
-    if (receive_history_from_all(state)) {
-        return 2;
-    }
     return 0;
 }
 
@@ -125,9 +125,9 @@ int broadcast_started(ProcessState *state) {
     char buffer[MAX_PAYLOAD_LEN];
     Message message;
 
-    on_message_send();
-    sprintf(buffer, log_started_fmt, get_lamport_time(), state->id, getpid(), getppid(), state->balance);
-    construct_message(&message, STARTED, strlen(buffer), buffer);
+    on_message_send(state);
+    sprintf(buffer, log_started_fmt, state->vector_time[state->id], state->id, getpid(), getppid(), state->balance);
+    construct_message(state, &message, STARTED, strlen(buffer), buffer);
     if (send_multicast(state, &message)) {
         return 1;
     }
@@ -138,8 +138,8 @@ int broadcast_started(ProcessState *state) {
 int broadcast_stop(ProcessState *state) {
     Message message;
 
-    on_message_send();
-    construct_message(&message, STOP, 0, NULL);
+    on_message_send(state);
+    construct_message(state, &message, STOP, 0, NULL);
     if (send_multicast(state, &message)) {
         return 1;
     }
@@ -150,9 +150,9 @@ int broadcast_done(ProcessState *state) {
     char buffer[MAX_PAYLOAD_LEN];
     Message message;
 
-    on_message_send();
-    sprintf(buffer, log_done_fmt, get_lamport_time(), state->id, state->balance);
-    construct_message(&message, DONE, strlen(buffer), buffer);
+    on_message_send(state);
+    sprintf(buffer, log_done_fmt, state->vector_time[state->id], state->id, state->balance);
+    construct_message(state, &message, DONE, strlen(buffer), buffer);
     if (send_multicast(state, &message)) {
         return 1;
     }
@@ -169,14 +169,14 @@ int receive_started_from_all(ProcessState *state) {
             if (receive(state, id, &message)) {
                 return 1;
             }
-            on_message_received(&message);
+            on_message_received(state, &message);
 
             if (message.s_header.s_type != STARTED) {
                 return 2;
             }
         }
     }
-    sprintf(buffer, log_received_all_started_fmt, get_lamport_time(), state->id);
+    sprintf(buffer, log_received_all_started_fmt, state->vector_time[state->id], state->id);
     log_event(state, buffer);
     return 0;
 }
@@ -190,36 +190,15 @@ int receive_done_from_all(ProcessState *state) {
             if (receive(state, id, &message)) {
                 return 1;
             }
-            on_message_received(&message);
+            on_message_received(state, &message);
 
             if (message.s_header.s_type != DONE) {
                 return 2;
             }
         }
     }
-    sprintf(buffer, log_received_all_done_fmt, get_lamport_time(), state->id);
+    sprintf(buffer, log_received_all_done_fmt, state->vector_time[state->id], state->id);
     log_event(state, buffer);
-    return 0;
-}
-
-int receive_history_from_all(ProcessState *state) {
-    Message message;
-    AllHistory all_history;
-
-    all_history.s_history_len = (uint8_t) state->processes_count;
-    for (local_id id = 1; id <= state->processes_count; ++id) {
-        if (receive(state, id, &message)) {
-            return 1;
-        }
-        on_message_received(&message);
-
-        if (message.s_header.s_type != BALANCE_HISTORY) {
-            return 2;
-        }
-
-        deserialize_history(message.s_payload, &all_history.s_history[id - 1]);
-    }
-    print_history(&all_history);
     return 0;
 }
 
@@ -236,7 +215,7 @@ int process_transfer_message(ProcessState *state, const Message *message) {
         return 0;
     }
     if (transfer_order.s_dst == state->id) {
-        if (process_transfer_in(state, message->s_header.s_local_time, &transfer_order)) {
+        if (process_transfer_in(state, &transfer_order)) {
             fprintf(stderr, "(%d) Failed to process transfer in!\n", state->id);
             return 1;
         }
@@ -245,19 +224,4 @@ int process_transfer_message(ProcessState *state, const Message *message) {
 
     fprintf(stderr, "(%d) Unknown transfer found!\n", state->id);
     return 1;
-}
-
-int send_history(ProcessState *state) {
-    Message message;
-    char buffer[MAX_PAYLOAD_LEN];
-    size_t serialized_size;
-
-    serialized_size = serialize_history(buffer, &state->history);
-
-    on_message_send();
-    construct_message(&message, BALANCE_HISTORY, serialized_size, buffer);
-    if (send(state, PARENT_ID, &message)) {
-        return 1;
-    }
-    return 0;
 }

@@ -28,37 +28,19 @@ typedef struct {
 
 typedef struct {
     balance_t   s_balance;
-    timestamp_t s_time;               ///< physical time in PA2 or Lamport's scalar
+    timestamp_t s_time;               ///< UNUSED physical time in PA2 or Lamport's scalar
                                       ///< time in PA3
-    balance_t   s_balance_pending_in; ///< $$$ sent at t <= s_time, but
+    balance_t   s_balance_pending_in; ///< UNUSED $$$ sent at t <= s_time, but
                                       ///< received at t > s_time. PA3 only,
                                       ///< in other labs must be 0
+                                      /*unused in vector-time*/
+    timestamp_t s_timevector[]; //time for vector clock
 } __attribute__((packed)) BalanceState;
 
 enum {
     MAX_T = 255 ///< max possible value of timestamp returned by get_lamport_time()
                 ///< or get_physical_time()
 };
-
-/**
- * Describes balance state of process with id=s_id at each time t >= 0
- * and t < s_history_len
- */
-typedef struct {
-    local_id        s_id;
-    uint8_t         s_history_len;
-    BalanceState    s_history[MAX_T + 1]; ///< Must be used as a buffer, unused
-                                          ///< part of array shouldn't be transfered
-} __attribute__((packed)) BalanceHistory;
-
-/**
- * Should contain balance histories of all processes in the distributed system
- * except parrent process.
- */
-typedef struct {
-    uint8_t          s_history_len; ///< should be equal to the number of children
-    BalanceHistory   s_history[MAX_PROCESS_ID + 1];
-} AllHistory;
 
 //------------------------------------------------------------------------------
 // Functions below must be implemented by students
@@ -84,20 +66,12 @@ void transfer(void * parent_data, local_id src, local_id dst, balance_t amount);
  */
 void bank_robbery(void * parent_data, local_id max_id);
 
-/**
- * Returs the value of Lamport's clock.
- */
-timestamp_t get_lamport_time();
-
-/** Returns physical time.
- *
- * Emulates physical clock (for each process).
- */
-timestamp_t get_physical_time();
-
-/** Pretty print for BalanceHistories.
+/*
+ * Returns vector timet
  *
  */
-void print_history(const AllHistory * history);
+timestamp_t get_vector_time();
+
+void total_sum_snapshot();
 
 #endif // __IFMO_DISTRIBUTED_CLASS_BANKING__H

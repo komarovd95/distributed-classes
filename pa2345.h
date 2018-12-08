@@ -16,6 +16,10 @@
 /*
  * <timestamp> process <local id> (pid <PID>, paranet <PID>) has STARTED with balance $<id>
  */
+ 
+static const char * const format_vector_snapshot =
+    "time [%d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d] total balance $%2d\n";
+    
 static const char * const log_started_fmt =
     "%d: process %1d (pid %5d, parent %5d) has STARTED with balance $%2d\n";
 
